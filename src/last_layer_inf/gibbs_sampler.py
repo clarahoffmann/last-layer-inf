@@ -21,7 +21,7 @@ def w_cond_D_tau_sq_sigma_sq(Psi, ys, tau_sq, sigma_eps_sq):
 
 def tau_sq_cond_D_w_sigma_sq(w, a_tau, b_tau, L):
     concentration = a_tau + .5*L
-    rate = b_tau + .5*(w.pow(2).sum().sqrt())
+    rate = b_tau + .5*(w.pow(2).sum())
     dist = InverseGamma(concentration = concentration , 
                         rate = rate)
     return dist.sample()
@@ -29,7 +29,7 @@ def tau_sq_cond_D_w_sigma_sq(w, a_tau, b_tau, L):
 
 def sigma_sq_cond_D_tau_sq_w(Psi, ys, w, a_sigma, b_sigma, N):
     concentration = a_sigma + .5*N
-    rate = b_sigma + .5*((ys - Psi @ w).pow(2).sum().sqrt())
+    rate = b_sigma + .5*((ys - Psi @ w).pow(2).sum())
     dist = InverseGamma(concentration = concentration, 
                         rate = rate)
     return dist.sample()
@@ -51,21 +51,21 @@ def gibbs_sampler(Psi: torch.tensor, ys: torch.tensor,
     # Initialize parameters
     tau_sq = .2
     sigma_sq = .2
+    with torch.no_grad():
+        for i in tqdm(range(num_iter)):
+            
+            # draw w | D, \tau^2, \sigma_eps^2 (Gaussian)
+            w = w_cond_D_tau_sq_sigma_sq(Psi, ys, tau_sq, sigma_sq)
+            samples['w'].append(w)
 
-    for i in tqdm(range(num_iter)):
+            # draw \tau^2 | D, w,  \sigma_eps^2 (inverse-gamma)
+            tau_sq = tau_sq_cond_D_w_sigma_sq(w, a_tau, b_tau, L)
+            samples['tau_sq'].append(tau_sq)
+
+            #  \sigma_eps^2 | D, \tau^2, w (inverse-gamma)
+            sigma_sq = sigma_sq_cond_D_tau_sq_w(Psi, ys, w, a_sigma, b_sigma, N)
+            samples['sigma_sq'].append(sigma_sq)
         
-        # draw w | D, \tau^2, \sigma_eps^2 (Gaussian)
-        w = w_cond_D_tau_sq_sigma_sq(Psi, ys, tau_sq, sigma_sq)
-        samples['w'].append(w)
-
-        # draw \tau^2 | D, w,  \sigma_eps^2 (inverse-gamma)
-        tau_sq = tau_sq_cond_D_w_sigma_sq(w, a_tau, b_tau, L)
-        samples['tau_sq'].append(tau_sq)
-
-        #  \sigma_eps^2 | D, \tau^2, w (inverse-gamma)
-        sigma_sq = sigma_sq_cond_D_tau_sq_w(Psi, ys, w, a_sigma, b_sigma, N)
-        samples['sigma_sq'].append(sigma_sq)
-    
     return samples['w'][warm_up:], samples['tau_sq'][warm_up:], samples['sigma_sq'][warm_up:]
 
 
@@ -80,11 +80,13 @@ def get_pred_post_dist(psi, w_sample, sigma_sq_sample, ys_grid):
      The pred. mean and standard deviation are integrated numericall via by \int y *pdf(y) dy
      and 
     """
-    p_hats = torch.mean(torch.exp(torch.stack([py_cond_x_w_sigma_eps(ys_grid, 
+    p_hats = torch.exp(torch.stack([py_cond_x_w_sigma_eps(ys_grid, 
                                                                      psi , 
                                                                      w_sample[i], 
                                                                      sigma_sq_sample[i]) for i in range(len(w_sample))]))
-                                                                    , axis = 0)
+                                                                    
+
+    p_hats = torch.mean(p_hats, dim = 0)                              
     y_mean = torch.trapz(p_hats*ys_grid,ys_grid)
 
     # Compute variance: E[x^2] - (E[x])^2
