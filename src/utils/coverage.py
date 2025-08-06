@@ -2,8 +2,9 @@
 
 from scipy.stats import norm
 import numpy as np
+import torch
 
-def compute_coverage_gaussian(pred_mean, pred_std, y_true, levels):
+def get_coverage_gaussian(pred_mean, pred_std, y_true, levels):
     empirical_coverage = []
 
     for alpha in levels:
@@ -15,3 +16,8 @@ def compute_coverage_gaussian(pred_mean, pred_std, y_true, levels):
         empirical_coverage.append(coverage)
 
     return np.array(empirical_coverage)
+
+
+
+    
+    
