@@ -1,0 +1,31 @@
+# Ignore Python cache directories/ Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Ignore logs
+logs
+**/logs
+**/logs_model
+
+# Ignore Mac system files
+.DS_store
+
+# Ignore checkpoints, some logger outputs
+**/.ckpt
+**/hparams.yml
+
+# coverage reports
+.cache
+
+# Ignore lightning_logs
+lightning_logs
+*/lightning_logs/*
+
+# JupyterNotebooks
+.ipynb_checkpoints
+*/.ipynb_checkpoints/*
+
+# IPython
+profile_default/
+ipython_config.py
