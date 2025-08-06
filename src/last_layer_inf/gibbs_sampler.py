@@ -21,7 +21,7 @@ def w_cond_D_tau_sq_sigma_sq(Psi, ys, tau_sq, sigma_eps_sq):
 
 def tau_sq_cond_D_w_sigma_sq(w, a_tau, b_tau, L):
     concentration = a_tau + .5*L
-    rate = b_tau + .5*(w.pow(2).sum())
+    rate = b_tau + .5*(w.pow(2).sum().sqrt()) # only with this the results look good, what is wrong?
     dist = InverseGamma(concentration = concentration , 
                         rate = rate)
     return dist.sample()
@@ -29,7 +29,7 @@ def tau_sq_cond_D_w_sigma_sq(w, a_tau, b_tau, L):
 
 def sigma_sq_cond_D_tau_sq_w(Psi, ys, w, a_sigma, b_sigma, N):
     concentration = a_sigma + .5*N
-    rate = b_sigma + .5*((ys - Psi @ w).pow(2).sum())
+    rate = b_sigma + .5*((ys - Psi @ w).pow(2).sum().sqrt()) 
     dist = InverseGamma(concentration = concentration, 
                         rate = rate)
     return dist.sample()
