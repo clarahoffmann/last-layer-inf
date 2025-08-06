@@ -6,6 +6,7 @@
 # 3. Compute mean and variance of the samples. """
 
 import torch
+import numpy as np
 from tqdm import tqdm
 from torch.distributions import MultivariateNormal, InverseGamma, Normal
 
@@ -94,3 +95,39 @@ def get_pred_post_dist(psi, w_sample, sigma_sq_sample, ys_grid):
     y_var = mean_sq_i - y_mean**2
 
     return p_hats.detach().numpy(), y_mean.detach().numpy(), y_var.detach().numpy()
+
+def get_prediction_interval_coverage(ys_grid, ys, p_hats, levels):
+
+    empirical_coverage = []
+    
+    for level in tqdm(levels):
+        # Normalize p_hats in case it doesn't integrate to 1
+        area = torch.trapz(p_hats, ys_grid)
+        p_normalized = p_hats / area
+
+        # Compute cumulative distribution (CDF)
+        cdf = torch.cumsum(p_normalized, dim=0)
+        cdf = cdf / cdf[-1]  # Normalize CDF
+
+        # Define lower and upper tail mass
+        lower_tail = (1 - level) / 2
+        upper_tail = 1 - lower_tail
+
+        # Interpolate to find quantiles
+        lower_idx = torch.searchsorted(cdf, lower_tail)
+        upper_idx = torch.searchsorted(cdf, upper_tail)
+
+        # Clamp indices to stay in bounds
+        lower_idx = min(lower_idx, len(ys_grid) - 1)
+        upper_idx = min(upper_idx, len(ys_grid) - 1)
+
+        lower_bound = ys_grid[lower_idx]
+        upper_bound = ys_grid[upper_idx]
+
+        covered = ((ys >= lower_bound) & (ys <= upper_bound)).float().mean().item()
+
+        empirical_coverage.append(covered)
+    
+    return np.array(empirical_coverage)
+
+
