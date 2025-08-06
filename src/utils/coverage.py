@@ -18,6 +18,18 @@ def get_coverage_gaussian(pred_mean, pred_std, y_true, levels):
     return np.array(empirical_coverage)
 
 
+def get_coverage_y_hats(y_samples, y_true, levels):
+    empirical_coverage = [] 
 
+    for level in levels:
+        lower = (1 - level) / 2
+        upper = 1 - lower
+
+        lower = torch.quantile(y_samples, lower, dim=1)
+        upper = torch.quantile(y_samples, upper, dim=1)
+        coverage = ((y_true >= lower) & (y_true <= upper)).float().mean()
+        empirical_coverage.append(coverage)
+    
+    return np.array(empirical_coverage)
     
     
