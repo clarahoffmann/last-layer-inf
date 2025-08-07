@@ -164,16 +164,21 @@ def run_vi_ridge(ys, Psi, num_iter, sigma_eps_sq, sigma_0_sq, lr):
         mu_tau_sq = torch.clamp(torch.nn.functional.softplus(mu[-2]), min=1e-4)
         mu_sigma_eps = torch.clamp(torch.nn.functional.softplus(mu[-1]), min=1e-4)
 
+        params_sample = mu + sigma*torch.randn_like(mu)
+
+        # we need to transform the means for tau_sq and sigma_eps_sq
+        # then we need also compute h_params based on the sample!!
+
         # posterior up to proportionality
         h_params = get_h_params_ridge(ys = ys, Psi =Psi, 
-                                    mu_w = mu_w, 
-                                    tau_sq = mu_tau_sq**2,
-                                    sigma_eps_sq = mu_sigma_eps, 
+                                    mu_w = mu_w, # here sample! 
+                                    tau_sq = mu_tau_sq**2, # here sample! 
+                                    sigma_eps_sq = mu_sigma_eps, # here sample! 
                                     N =  N, L = L, a_sigma = 0.2, b_sigma = 0.2, nu = 3)
         
         # need to subtract entropy of gaussian variational distribution here (diag. gaussian with mean
         # mu_w and variance sigma_w^2).
-        log_q_params = -0.5 * L * math.log(math.tensor(2 * math.pi)) -torch.sum(torch.log(sigma), dim=-1) -0.5 * torch.sum(((w - mu) / sigma) ** 2, dim=-1)
+        log_q_params = -0.5 * L * math.log(2 * math.pi) -torch.sum(torch.log(sigma), dim=-1) -0.5 * torch.sum(((params_sample - mu) / sigma) ** 2, dim=-1)
         elbo = h_params - log_q_params
         loss = - elbo
         elbos.append(elbo.item())
