@@ -4,6 +4,7 @@ import torch
 from tqdm import tqdm
 from typing import Tuple, Literal
 from scipy.special import gammaln
+import torch.nn as nn
 
 def get_log_likelihood_closed_form(ys: torch.Tensor, 
                                    Psi: torch.Tensor,
@@ -17,7 +18,7 @@ def get_log_likelihood_closed_form(ys: torch.Tensor,
         - 0.5 * torch.sum((ys - pred_y) ** 2) / sigma_eps_sq
     )
 
-    var_component = 0.5 * (1.0 / sigma_eps_sq) * torch.sum((Psi ** 2) / sigma_w_sq, dim=1)
+    var_component = 0.5 * (1.0 / sigma_eps_sq) * torch.sum((Psi ** 2)* sigma_w_sq, dim=1)
 
     likelihood = torch.sum(log_likelihood) - torch.sum(var_component)
     return likelihood
@@ -35,15 +36,15 @@ def get_h_params_ridge(ys: torch.Tensor,
                             L: int,
                             N: int) -> torch.Tensor:
 
-    term1 = log_p_y_cond_w_tau_sq(Psi, mu_w, ys, tau_sq, L, N)
+    term1 = log_p_y_cond_w_sigma_sq(Psi, mu_w, ys, sigma_eps_sq, N)
     term2 = log_p_w_cond_tau_sq(mu_w, tau_sq, L) 
     term3 = log_p_tau_sq(tau_sq, nu)
     term4 = log_p_sigma_eps_sq(sigma_eps_sq, a_sigma, b_sigma)
 
     return term1 + term2 + term3 + term4
 
-def log_p_y_cond_w_tau_sq(Psi, mu_w, ys, sigma_eps_sq, L, N):
-    """Log of p(y | x, w, tau_sq) for the ridge prior (log-likelihood)."""
+def log_p_y_cond_w_sigma_sq(Psi, mu_w, ys, sigma_eps_sq,  N):
+    """Log of p(y | x, w, sigma_eps_sq) for the ridge prior (log-likelihood)."""
     pred_y = Psi @ mu_w
     log_likelihood = (
         - 0.5 * N * torch.log(sigma_eps_sq) 
@@ -54,7 +55,7 @@ def log_p_y_cond_w_tau_sq(Psi, mu_w, ys, sigma_eps_sq, L, N):
 
 def log_p_w_cond_tau_sq(w, tau_sq, L):
     """Log of p(w|tau^2) for the ridge prior."""
-    return - .5*torch.sum(w**2/tau_sq) - .5*L*math.log(2*torch.pi) - 0.5*L*torch.log(tau_sq)
+    return - .5*torch.sum(w**2/tau_sq) - .5*L*math.log(2*math.pi) - 0.5*L*torch.log(tau_sq)
 
 def log_p_tau_sq(tau_sq, nu):
     """Log-density of the scale-dependent prior of Klein, Kneib 2016"""
@@ -68,43 +69,12 @@ def log_p_sigma_eps_sq(sigma_eps_sq, a_sigma, b_sigma):
 
 #def get_log_likelihood_horseshoe():
 
-def run_vi_ridge(ys, Psi, num_iter, sigma_w, mu_w, sigma_eps_sq, sigma_0_sq, N, lr):
-
-    N, L = Psi.shape
-    mu = torch.zeros(L, requires_grad=True)
-    rho = torch.zeros(L, requires_grad=True) 
-
-    optimizer = torch.optim.Adam([mu, rho], lr=lr)
-    elbos = []
-
-    for _ in range(num_iter):
-        optimizer.zero_grad()
-
-        log_likelihood = get_log_likelihood_ridge(ys, Psi, mu_w, sigma_eps_sq, sigma_w**2, N)
-        kld = 0.5 * torch.sum(
-            torch.log(sigma_w**2 / sigma_0_sq) + (sigma_0_sq**-1) * (mu**2 + sigma_w**2) - 1
-        )
-        elbo = log_likelihood + kld
-        loss = - elbo
-
-        loss.backward()
-        optimizer.step()
-
-    lambdas = {
-            'mu': mu.detach(),
-            'tau_sq': torch.nn.functional.softplus(rho.detach()),
-            'sigma_eps': torch.nn.functional.softplus(rho.detach())
-        }
-
-
-    return lambdas, elbos
-
 
 def run_vi_closed_form(ys, Psi, num_iter, sigma_0_sq, sigma_eps_sq, lr):
 
     N, L = Psi.shape
-    mu = torch.zeros(L, requires_grad=True)
-    rho = torch.zeros(L, requires_grad=True) 
+    mu = nn.Parameter(torch.zeros(L, requires_grad=True))
+    rho = nn.Parameter(torch.zeros(L, requires_grad=True))
 
     optimizer = torch.optim.Adam([mu, rho], lr=lr)
     elbos = []
@@ -113,16 +83,22 @@ def run_vi_closed_form(ys, Psi, num_iter, sigma_0_sq, sigma_eps_sq, lr):
         optimizer.zero_grad()
 
         # transformation to ensure sigma is pos.
-        sigma_w = torch.nn.functional.softplus(rho)
-        sigma_w = torch.clamp(sigma_w, min=1e-4)
+        sigma_w = torch.exp(rho) + 1e-5
+        #sigma_w = torch.clamp(sigma_w, min=1e-4)
         
         # compute elbo in closed form
-        log_likelihood = get_log_likelihood_closed_form(ys, Psi, mu, sigma_eps_sq, sigma_w**2, N)
+        log_likelihood = get_log_likelihood_closed_form(ys = ys, 
+                                                        Psi = Psi, 
+                                                        mu_w = mu, 
+                                                        sigma_eps_sq = sigma_eps_sq, 
+                                                        sigma_w_sq = sigma_w**2, N = N)
         kld = 0.5 * torch.sum(
-            torch.log(sigma_w**2 / sigma_0_sq) + (sigma_0_sq**-1) * (mu**2 + sigma_w**2) - 1
+            torch.log(sigma_0_sq / sigma_w**2) +
+            (sigma_w**2 + mu**2) / sigma_0_sq -
+            1
         )
 
-        elbo = log_likelihood - kld
+        elbo = log_likelihood - .5* kld
         loss = - elbo
 
         loss.backward()
@@ -132,67 +108,80 @@ def run_vi_closed_form(ys, Psi, num_iter, sigma_0_sq, sigma_eps_sq, lr):
     
     lambdas = {
             'mu': mu.detach(),
-            'sigma': torch.nn.functional.softplus(rho.detach()),
+            'sigma': torch.exp(rho.detach()),
         }
 
     return lambdas, elbos
 
 
-def run_vi_ridge(ys, Psi, num_iter, sigma_eps_sq, sigma_0_sq, lr):
+def run_vi_ridge(ys, Psi, num_iter, lr, S = 10):
 
     N, L = Psi.shape
     # we estimate the variational distribution for 
-    # w_1, ..., w_L, tau_sq, sigma_eps
+    # w_1, ..., w_L, log(tau_sq^2), log(sigma_eps^2)
     # -> we need dimension L + 2 for the variational distribution
-    mu = torch.zeros(L + 2, requires_grad=True)
+    # for the ridge prior we have the parameters
+    mu = torch.ones(L + 2, requires_grad=True)
     rho = torch.zeros(L + 2, requires_grad=True) 
 
     optimizer = torch.optim.Adam([mu, rho], lr=lr)
     elbos = []
+    mus = []
+    rhos = []
 
     for _ in tqdm(range(num_iter)):
         optimizer.zero_grad()
 
 
-        # we also need a sample from q_lambda to evaluate all the expressions here...?
         # transformation to ensure sigma is pos.
-        sigma = torch.nn.functional.softplus(rho)
-        sigma = torch.clamp(sigma, min=1e-4)
+        sigma = torch.exp(rho)
+        sigma = torch.clamp(sigma, min=1e-6)
         
-        # split mu and sigmas
-        mu_w = mu[:L]
-        mu_tau_sq = torch.clamp(torch.nn.functional.softplus(mu[-2]), min=1e-4)
-        mu_sigma_eps = torch.clamp(torch.nn.functional.softplus(mu[-1]), min=1e-4)
+        # sample parameters
+        eps = torch.randn(S, L + 2)
+        params_sample = mu + sigma*eps
 
-        params_sample = mu + sigma*torch.randn_like(mu)
-
-        # we need to transform the means for tau_sq and sigma_eps_sq
-        # then we need also compute h_params based on the sample!!
+        # split parameters and transform log(tau^2) and log(sigma_eps^2) back
+        w_samples = params_sample[:, :L]
+        tau_sq_samples = torch.exp(params_sample[:,-2]) + 1e-5
+        sigma_eps_sq_samples = torch.exp(params_sample[:,-1]) + 1e-5
 
         # posterior up to proportionality
-        h_params = get_h_params_ridge(ys = ys, Psi =Psi, 
-                                    mu_w = mu_w, # here sample! 
-                                    tau_sq = mu_tau_sq**2, # here sample! 
-                                    sigma_eps_sq = mu_sigma_eps, # here sample! 
-                                    N =  N, L = L, a_sigma = 0.2, b_sigma = 0.2, nu = 3)
+        h_vals = []
+        for s in range(S):
+            h = get_h_params_ridge(
+                ys=ys, Psi=Psi, 
+                mu_w=w_samples[s],
+                tau_sq=tau_sq_samples[s],
+                sigma_eps_sq=sigma_eps_sq_samples[s],
+                N=N, L=L, 
+                a_sigma=2, b_sigma=2, nu=2.5
+            )
+            h_vals.append(h)
+        h_params = torch.stack(h_vals).mean()
         
-        # need to subtract entropy of gaussian variational distribution here (diag. gaussian with mean
+        # need to subtract logprob of gaussian variational distribution here (diag. gaussian with mean
         # mu_w and variance sigma_w^2).
-        log_q_params = -0.5 * L * math.log(2 * math.pi) -torch.sum(torch.log(sigma), dim=-1) -0.5 * torch.sum(((params_sample - mu) / sigma) ** 2, dim=-1)
-        elbo = h_params - log_q_params
+        log_q_params = (- 0.5 * (L+2) * math.log(2 * math.pi) \
+                        - torch.sum(torch.log(sigma), dim=-1) \
+                        - 0.5 * torch.sum((((params_sample - mu) / sigma) ** 2), dim = -1)).mean()
+        
+        elbo = h_params + log_q_params
         loss = - elbo
         elbos.append(elbo.item())
+        mus.append(mu.detach())
+        rhos.append(rho.detach())
 
         loss.backward()
         optimizer.step()
 
     lambdas = {
             'mu': mu.detach(),
-            'sigma': torch.nn.functional.softplus(rho.detach()),
+            'sigma': torch.exp(rho.detach()),
         }
 
 
-    return lambdas, elbos
+    return lambdas, elbos, mus, rhos
 
 def fit_vi_post_hoc(ys: torch.tensor,
                     Psi: torch.tensor, 
@@ -204,15 +193,17 @@ def fit_vi_post_hoc(ys: torch.tensor,
 
     if method == 'closed_form':
         lambdas, elbos = run_vi_closed_form(ys, Psi, num_iter, sigma_0_sq, sigma_eps_sq, lr)
+        return lambdas, elbos
     
     elif method == 'ridge':
-        lambdas, elbos = run_vi_ridge(ys = ys, Psi = Psi, sigma_0_sq = 0, 
-                                      num_iter = num_iter, sigma_eps_sq = sigma_eps_sq, lr = lr)
+        lambdas, elbos, mus, rhos = run_vi_ridge(ys = ys, Psi = Psi,
+                                      num_iter = num_iter, lr = lr)
+        return lambdas, elbos,  mus, rhos
 
     else:
         ValueError('Invalid method. Choose ridge or horseshoe as method')
 
-    return lambdas, elbos
+    
 
 
 def predictive_posterior(Psi: torch.Tensor, mu: torch.Tensor, 
