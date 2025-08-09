@@ -6,23 +6,6 @@ from typing import Tuple, Literal
 from scipy.special import gammaln
 import torch.nn as nn
 
-def get_log_likelihood_closed_form(ys: torch.Tensor, 
-                                   Psi: torch.Tensor,
-                                   mu_w: torch.Tensor,  
-                                   sigma_eps_sq: torch.Tensor, 
-                                   sigma_w_sq: torch.Tensor, 
-                                   N: int) -> torch.Tensor:
-    pred_y = Psi @ mu_w
-    log_likelihood = (
-        - 0.5 * N * torch.log(sigma_eps_sq) 
-        - 0.5 * torch.sum((ys - pred_y) ** 2) / sigma_eps_sq
-    )
-
-    var_component = 0.5 * (1.0 / sigma_eps_sq) * torch.sum((Psi ** 2)* sigma_w_sq, dim=1)
-
-    likelihood = torch.sum(log_likelihood) - torch.sum(var_component)
-    return likelihood
-
 
 
 def get_h_params_ridge(ys: torch.Tensor, 
@@ -65,53 +48,6 @@ def log_p_sigma_eps_sq(sigma_eps_sq, a_sigma, b_sigma):
     log_prob1 = (a_sigma * math.log(b_sigma) - gammaln(a_sigma))
     log_prob2 = - (a_sigma + 1) * math.log(sigma_eps_sq + 1e-4) - b_sigma / sigma_eps_sq
     return log_prob1 +log_prob2
-
-
-#def get_log_likelihood_horseshoe():
-
-
-def run_vi_closed_form(ys, Psi, num_iter, sigma_0_sq, sigma_eps_sq, lr):
-
-    N, L = Psi.shape
-    mu = nn.Parameter(torch.zeros(L, requires_grad=True))
-    rho = nn.Parameter(torch.zeros(L, requires_grad=True))
-
-    optimizer = torch.optim.Adam([mu, rho], lr=lr)
-    elbos = []
-    
-    for _ in tqdm(range(num_iter)):
-        optimizer.zero_grad()
-
-        # transformation to ensure sigma is pos.
-        sigma_w = torch.exp(rho) + 1e-5
-        #sigma_w = torch.clamp(sigma_w, min=1e-4)
-        
-        # compute elbo in closed form
-        log_likelihood = get_log_likelihood_closed_form(ys = ys, 
-                                                        Psi = Psi, 
-                                                        mu_w = mu, 
-                                                        sigma_eps_sq = sigma_eps_sq, 
-                                                        sigma_w_sq = sigma_w**2, N = N)
-        kld = 0.5 * torch.sum(
-            torch.log(sigma_0_sq / sigma_w**2) +
-            (sigma_w**2 + mu**2) / sigma_0_sq -
-            1
-        )
-
-        elbo = log_likelihood - .5* kld
-        loss = - elbo
-
-        loss.backward()
-        optimizer.step()
-
-        elbos.append(elbo.item())
-    
-    lambdas = {
-            'mu': mu.detach(),
-            'sigma': torch.exp(rho.detach()),
-        }
-
-    return lambdas, elbos
 
 
 def run_vi_ridge(ys, Psi, num_iter, lr, S = 10):
@@ -186,16 +122,14 @@ def run_vi_ridge(ys, Psi, num_iter, lr, S = 10):
 def fit_vi_post_hoc(ys: torch.tensor,
                     Psi: torch.tensor, 
                     num_iter: float, 
-                    method : Literal["closed_form", "ridge"],
+                    method : Literal["ridge"],
+                    mu_0: torch.Tensor,
                     sigma_eps_sq: float = 1.0,
                     sigma_0_sq: float = 1.0,
-                    lr: float = 1e-4) -> Tuple[list[torch.tensor]]:
+                    lr: float = 1e-4, 
+                    ) -> Tuple[list[torch.tensor]]:
 
-    if method == 'closed_form':
-        lambdas, elbos = run_vi_closed_form(ys, Psi, num_iter, sigma_0_sq, sigma_eps_sq, lr)
-        return lambdas, elbos
-    
-    elif method == 'ridge':
+    if method == 'ridge':
         lambdas, elbos, mus, rhos = run_vi_ridge(ys = ys, Psi = Psi,
                                       num_iter = num_iter, lr = lr)
         return lambdas, elbos,  mus, rhos
@@ -207,9 +141,9 @@ def fit_vi_post_hoc(ys: torch.tensor,
 
 
 def predictive_posterior(Psi: torch.Tensor, mu: torch.Tensor, 
-                         sigma: torch.Tensor, sigma_eps_sq: torch.Tensor):
+                         Sigma_w: torch.Tensor, sigma_eps_sq: torch.Tensor):
 
     pred_mean = Psi @ mu
-    pred_var = sigma_eps_sq + torch.sum((Psi ** 2) * (sigma ** 2).unsqueeze(0), dim=1)
+    pred_var = sigma_eps_sq + (Psi @ Sigma_w @ Psi.T)
 
     return pred_mean.detach().numpy(), pred_var.detach().numpy()
