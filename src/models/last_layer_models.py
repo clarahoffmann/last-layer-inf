@@ -116,7 +116,7 @@ class LastLayerVIClosedForm(nn.Module):
         L = self.get_L()
         eps = torch.randn_like(self.mu)
         w_samples = self.mu + torch.bmm(L, eps.unsqueeze(-1)).squeeze(-1)
-        return X @ w_samples.t(), w_samples
+        return X @ w_samples.t(), w_samples # variance is missing here
     
     def kl_divergence(self):
         L = self.get_L()
