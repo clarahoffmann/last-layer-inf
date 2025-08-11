@@ -4,7 +4,7 @@ import torch
 from tqdm import tqdm
 from typing import Tuple, Literal
 from scipy.special import gammaln
-import torch.nn as nn
+from torch.optim import Adam
 
 
 
@@ -147,3 +147,42 @@ def predictive_posterior(Psi: torch.Tensor, mu: torch.Tensor,
     pred_var = sigma_eps_sq + (Psi @ Sigma_w @ Psi.T)
 
     return pred_mean.detach().numpy(), pred_var.detach().numpy()
+
+def run_last_layer_vi_closed_form(model, ys_train, Psi, sigma_eps_sq, lr = 1e-2, temperature = 1, num_epochs = 1000):
+
+    optimizer_vi = Adam(model.parameters(), lr=lr)
+
+    elbos = []
+    for epoch in range(num_epochs):
+        optimizer_vi.zero_grad()
+        
+        # compute y_hat with current var. parameters
+        pred_y_mu= model.forward_det(Psi)
+        
+        # get current covariance of var. distribution
+        L = model.get_L().squeeze() # Cholesky factor
+        Sigma_w = L @ L.T # actual covariance matrix
+
+        # get kl term
+        kl = model.kl_divergence()
+
+        # get likelihood term
+        log_likelihood = (
+        -0.5 * Psi.shape[0] * math.log(2 * torch.pi * (sigma_eps_sq / temperature))
+        - 0.5 * temperature / sigma_eps_sq * torch.sum((ys_train - pred_y_mu) ** 2)
+        - 0.5 * temperature / sigma_eps_sq * torch.diagonal(Psi @ Sigma_w @ Psi.T).sum())
+        
+        # combine for final ELBO
+        elbo = (
+            log_likelihood
+            - kl
+        )
+        loss = -elbo
+        loss.backward()
+        optimizer_vi.step()
+        if epoch % 100 == 0:
+            print(f"VI epoch {epoch} ELBO: {elbo.item():.3f} \n 'log likelihood: {log_likelihood.item():.3f}")
+
+        elbos.append(elbo.item())
+    
+    return model, elbos
