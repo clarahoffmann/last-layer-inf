@@ -80,6 +80,52 @@ def train_last_layer_det(model: nn.Module,
 
     return model, losses_train, losses_val
 
+def fit_last_layer_closed_form(model_dims, dataloader_train, dataloader_val, xs_train, ys_train, xs_val, num_epochs, sigma_0):
+
+    # fit deep feature projector
+    lli_net = LLI(model_dims)
+    lli_net, losses_train, losses_val = train_last_layer_det(model = lli_net, 
+                                                        dataloader_train = dataloader_train,
+                                                        dataloader_val = dataloader_val, 
+                                                        num_epochs = num_epochs)
+    
+    lli_net.eval()
+
+    # fit last-layer posterior
+    with torch.no_grad():
+        Psi = lli_net.get_ll_embedd(xs_train).detach()
+        d = Psi.shape[1]
+        Sigma_N_inv = (1/sigma_0**2)*torch.eye(d) + (1/sigma_0**2)*(Psi.T @ Psi)
+        Sigma_N = torch.linalg.inv(Sigma_N_inv).detach()
+        mu_N = Sigma_N @ ((1/sigma_0**2)*(Psi.T @ ys_train))
+        Sigma_N = Sigma_N
+
+    # get pred. means and variances
+    lli_pred_mu, lli_pred_sigma_sq = get_post_pred_dens(model = lli_net, x_star = xs_val , 
+                              mu_N = mu_N, Sigma_N = Sigma_N, sigma_eps = sigma_0 )
+    
+    out_dict = {'mu_N': mu_N.detach().numpy(),
+           'Sigma_N': Sigma_N.detach().numpy(),
+           'pred_mu': lli_pred_mu,
+           'pred_sigma': np.sqrt(lli_pred_sigma_sq),
+           'losses_train': losses_train,
+           'losses_val': losses_val,
+           }
+    
+    return out_dict, lli_net
+
+def get_metrics_lli_closed_form(mu_N, Sigma_N, model, xs_val, ys_val, sigma_0 ):
+    lli_pred_mu, lli_pred_sigma_sq = get_post_pred_dens(model = model, x_star = xs_val , 
+                              mu_N = mu_N, Sigma_N = Sigma_N, sigma_eps = sigma_0 )
+    lli_pred_sigma = np.sqrt(lli_pred_sigma_sq)
+
+    rmse_lli = (ys_val.reshape(-1,1) - torch.tensor(lli_pred_mu)).pow(2).sqrt()
+    rmse_lli_mean = rmse_lli.mean()
+    rmse_lli_std = rmse_lli.std()
+
+    return rmse_lli_mean, rmse_lli_std, lli_pred_mu, lli_pred_sigma
+    
+
 
 def get_post_pred_dens(model: nn.Module, x_star: np.ndarray, 
                        mu_N: torch.tensor, Sigma_N: torch.tensor, 

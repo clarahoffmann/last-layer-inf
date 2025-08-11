@@ -7,16 +7,16 @@ import torch
 def get_coverage_gaussian(pred_mean, pred_std, y_true, levels):
     empirical_coverage = []
 
-    for alpha in levels:
-        z = norm.ppf(0.5 + alpha / 2.0)
-        lower = pred_mean - z * pred_std
-        upper = pred_mean + z * pred_std
+    for level in levels:
+        alpha = 1 - level
+
+        lower = pred_mean + pred_std * norm.ppf(alpha / 2)
+        upper = pred_mean + pred_std * norm.ppf(1 - alpha / 2)
 
         coverage = ((y_true >= lower) & (y_true <= upper)).mean()
         empirical_coverage.append(coverage)
 
     return np.array(empirical_coverage)
-
 
 def get_coverage_y_hats(y_samples, y_true, levels):
     empirical_coverage = [] 

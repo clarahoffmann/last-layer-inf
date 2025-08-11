@@ -7,15 +7,19 @@ from tqdm import tqdm
 
 @variational_estimator
 class BNN(nn.Module):
-    def __init__(self):
+    def __init__(self, dims):
         super().__init__()
-        self.blinear1 = BayesianLinear(1, 100)
-        self.ReLU = nn.ReLU()
-        self.blinear2 = BayesianLinear(100, 1)
+        self.fc = nn.Sequential(
+            *[
+                layer
+                for in_dim, out_dim in zip(dims[:-2], dims[1:-1])
+                for layer in (nn.BayesianLinear(in_dim, out_dim), nn.ReLU(), nn.Dropout(p=p))
+            ],
+            nn.Linear(dims[-2], dims[-1])
+        )
 
     def forward(self, x):
-        x = self.ReLU(self.blinear1(x))
-        x = self.blinear2(x)
+        x = self.f(x)
         return x
     
 def train_bnn(model, num_epochs, dataloader_train, dataloader_val):
@@ -57,6 +61,16 @@ def train_bnn(model, num_epochs, dataloader_train, dataloader_val):
         losses_val.append(val_loss / len(dataloader_val.dataset))
     
     return model, losses_train, losses_val
+
+
+def train_bnn(model_dims, num_epochs, dataloader_train, dataloader_val):
+    bnn = BNN(model_dims)
+    bnn, losses_train, losses_val = train_bnn(model = bnn, 
+                                          num_epochs = num_epochs*2, 
+                                          dataloader_train = dataloader_train, 
+                                          dataloader_val = dataloader_val)
+    
+    return bnn, losses_train, losses_val
 
 
 
