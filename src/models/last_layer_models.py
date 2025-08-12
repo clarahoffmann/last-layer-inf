@@ -179,3 +179,94 @@ class LastLayerVIClosedForm(nn.Module):
         
         kl = 0.5 * (log_det_prior - log_det_q - self.dim_last_layer + trace_term)
         return kl.sum()
+    
+
+class LastLayerVIRidge(nn.Module):
+    def __init__(self, in_features, out_features):
+        super().__init__()
+        self.in_features = in_features
+        self.out_features = out_features
+        
+        self.mu = nn.Parameter(torch.zeros(out_features, in_features))
+        self.log_tau_sq = nn.Parameter(torch.ones(out_features, 1))
+        self.log_sigma_eps_sq = nn.Parameter(torch.ones(out_features, 1))
+
+        self.Sigma_q_unconstrained = nn.Parameter(torch.randn(out_features, in_features + 2) * 0.01)
+    
+    def get_tau_sq(self):
+        return torch.nn.functional.exp(self.log_tau_sq)
+    
+    def get_sigma_eps_sq(self):
+        return torch.nn.functional.exp(self.log_sigma_eps_sq)
+
+    def get_Sigma_q(self):
+        Sigma_q = torch.nn.functional.softplus(self.Sigma_q_unconstrained) + 1e-5
+        return Sigma_q
+    
+    def forward(self, X, S = 5):
+        # sample 
+        params = torch.cat([self.mu, self.log_tau_sq, self.log_sigma_eps_sq], dim = -1 )
+        eps = torch.randn(S, params.shape[1])  
+        Sigma_q = self.get_Sigma_q()
+        params_samples = params + Sigma_q*eps
+
+        y_sample = X @ params_samples[:, :self.in_features].t()
+        
+        return params_samples, params, y_sample, Sigma_q
+    
+    def forward_sample(self, X, S = 1):
+        # sample 
+        params = torch.cat([self.mu, self.log_tau_sq, self.log_sigma_eps_sq], dim = -1 )
+        eps = torch.randn(S, params.shape[1])  
+        L = self.get_Sigma_q()
+        params_samples = params + L*eps
+        w_sample = params_samples[:, :self.in_features]
+
+        y_sample = X @ w_sample.T # variance is missing here
+        
+        return y_sample
+    
+
+class LastLayerVIHorseshoe(nn.Module):
+    def __init__(self, in_features, out_features):
+        super().__init__()
+        self.in_features = in_features
+        self.out_features = out_features
+        
+        self.mu = nn.Parameter(torch.zeros(out_features, in_features))
+        self.log_lambda_mu = nn.Parameter(torch.zeros(out_features, in_features))
+        self.log_sigma_eps_sq_mu = nn.Parameter(torch.zeros(out_features, 1))
+
+        total_dim = in_features + in_features + 1
+        self.Sigma_q_unconstrained = nn.Parameter(
+            torch.randn(out_features, total_dim) * 0.01
+        )
+    
+    def get_sigma_eps_sq(self):
+        return torch.exp(self.log_sigma_eps_sq_mu)
+
+    def get_Sigma_q(self):
+        return torch.nn.functional.softplus(self.Sigma_q_unconstrained) + 1e-5
+    
+    def forward(self, X, S=5):
+
+        params = torch.cat([self.mu, self.log_lambda_mu, self.log_sigma_eps_sq_mu], dim=-1)
+        
+        eps = torch.randn(S, params.shape[1], device=params.device)
+        Sigma_q = self.get_Sigma_q()
+        params_samples = params + Sigma_q * eps
+
+        w_samples = params_samples[:, :self.in_features]
+        y_sample = X @ w_samples.T
+        
+        return params_samples, params, y_sample, Sigma_q
+    
+    def forward_sample(self, X, S=1):
+        params = torch.cat([self.mu, self.log_lambda_mu, self.log_sigma_eps_sq_mu], dim=-1)
+        eps = torch.randn(S, params.shape[1], device=params.device)
+        Sigma_q = self.get_Sigma_q()
+        params_samples = params + Sigma_q * eps
+        
+        w_samples = params_samples[:, :self.in_features]
+        y_sample = X @ w_samples.T
+        return y_sample
