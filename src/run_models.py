@@ -114,9 +114,30 @@ def main() -> None:
     # create training data
     if params['data'] == 'synthetic':
 
-        xs, ys, xs_train, ys_train, xs_val, ys_val = create_synthetic_train_data(xs_range =  PARAMS_SYNTH["xs_range"], 
+        data_file = Path("./results/synthetic_data.npz")
+        if data_file.is_file():
+            logger.info("Loading existing synthetic training data.")
+            data = np.load(data_file)
+            xs_train = torch.tensor(data["xs_train"])
+            ys_train = torch.tensor(data["ys_train"])
+            xs_val   = torch.tensor(data["xs_val"])
+            ys_val   = torch.tensor(data["ys_val"])
+
+        else:
+            logger.info("Creating new synthetic training data.")
+            xs, ys, xs_train, ys_train, xs_val, ys_val = create_synthetic_train_data(xs_range =  PARAMS_SYNTH["xs_range"], 
                                                                                  num_points = PARAMS_SYNTH['num_points'],  
                                                                                  sigma_eps = PARAMS_SYNTH['sigma_eps'])
+            logger.info("Save synthetic training data.")
+            np.savez_compressed(
+                data_file,
+                xs=xs,
+                ys=ys,
+                xs_train=xs_train,
+                ys_train=ys_train,
+                xs_val=xs_val,
+                ys_val=ys_val
+            )
 
         data = TensorDataset(xs_train, ys_train)
         train_set, val_set = torch.utils.data.random_split(data, [80, 20])
@@ -127,7 +148,7 @@ def main() -> None:
 
     if params['method'] == 'mc_dropout':
         # train model
-        logger.info("Start training {params['method']}....")
+        logger.info(f"Start training {params['method']}....")
         mc_net, out_dict = fit_mc_dropout(model_dims =params['model_dims'], 
                                           xs_pred = xs_val, 
                                           dataloader_train = dataloader_train, 
@@ -143,8 +164,8 @@ def main() -> None:
         coverage =  get_coverage_mc_dropout(ys_samples_mc, ys_val, PARAMS_SYNTH['CI_levels'])
 
          # save
-        out_dict['rmse_mean'] = rmse_mc_mean, 
-        out_dict['rmse_std'] = rmse_mc_std,
+        out_dict['rmse_mean'] = rmse_mc_mean.item() 
+        out_dict['rmse_std'] = rmse_mc_std.item()
         out_dict['coverage'] = coverage
 
         torch.save(
@@ -167,15 +188,17 @@ def main() -> None:
                                           dataloader_train = dataloader_train, 
                                           dataloader_val = dataloader_val)
         
-        bnn_samples, rmse_bnn_mean, rmse_bnn_std = get_metrics_bnn(bnn = bnn, xs_val = xs_val, ys_val = ys_val)
+        bnn_samples, rmse_bnn_mean, rmse_bnn_std = get_metrics_bnn(bnn = bnn, 
+                                                                   xs_val = xs_val, 
+                                                                   ys_val = ys_val)
 
         coverage = get_coverage_y_hats(y_samples = torch.stack(bnn_samples).squeeze(), 
                                         y_true = ys_val, 
                                         levels = PARAMS_SYNTH['CI_levels'])
 
         # save
-        out_dict['rmse_mean'] = rmse_bnn_mean, 
-        out_dict['rmse_std'] = rmse_bnn_std,
+        out_dict['rmse_mean'] = rmse_bnn_mean.item()
+        out_dict['rmse_std'] = rmse_bnn_std.item()
         out_dict['coverage'] = coverage
 
         torch.save(
@@ -219,8 +242,8 @@ def main() -> None:
                                              y_true = ys_val.detach().numpy(), 
                                              levels=PARAMS_SYNTH['CI_levels'])
         
-        out_dict['rmse_mean'] = rmse_lli_mean, 
-        out_dict['rmse_std'] = rmse_lli_std,
+        out_dict['rmse_mean'] = rmse_lli_mean.item()
+        out_dict['rmse_std'] = rmse_lli_std.item()
         out_dict['coverage'] = coverage_lli
 
         torch.save(
@@ -317,8 +340,8 @@ def main() -> None:
         
         logger.info('Get metrics...')
         rmse_lli = (ys_val.reshape(-1,1) - pred_mu).pow(2).sqrt()
-        rmse_mean = rmse_lli.mean()
-        rmse_std = rmse_lli.std()
+        rmse_mean = rmse_lli.mean().item()
+        rmse_std = rmse_lli.std().item()
         coverage = get_coverage_gaussian(pred_mean = pred_mu.detach().numpy(), 
                                          pred_std = pred_std.detach().numpy(), 
                                          y_true = ys_val.detach().numpy(), 
@@ -372,8 +395,8 @@ def main() -> None:
         
         logger.info('Get metrics...')
         rmse_lli = (ys_val.reshape(-1,1) - pred_mu).pow(2).sqrt()
-        rmse_mean = rmse_lli.mean()
-        rmse_std = rmse_lli.std()
+        rmse_mean = rmse_lli.mean().item()
+        rmse_std = rmse_lli.std().item()
         coverage = get_coverage_gaussian(pred_mean = pred_mu.detach().numpy(), 
                                          pred_std = pred_std.detach().numpy(), 
                                          y_true = ys_val.detach().numpy(), 
@@ -426,8 +449,8 @@ def main() -> None:
 
         logger.info('Get metrics...')
         rmse_lli = (ys_val.reshape(-1,1) - pred_mu).pow(2).sqrt()
-        rmse_mean = rmse_lli.mean()
-        rmse_std = rmse_lli.std()
+        rmse_mean = rmse_lli.mean().item()
+        rmse_std = rmse_lli.std().item()
         coverage = get_coverage_gaussian(pred_mean = pred_mu.detach().numpy(), 
                                          pred_std = pred_std.detach().numpy(), 
                                          y_true = ys_val.detach().numpy(), 
