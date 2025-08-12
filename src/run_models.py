@@ -15,12 +15,12 @@ import matplotlib.pyplot as plt
 from torch.utils.data import DataLoader, TensorDataset
 from numpy.lib.stride_tricks import sliding_window_view
 import torch.nn.functional as F
-from models.last_layer_models import fit_last_layer_closed_form, get_metrics_lli_closed_form, LLI
+from models.last_layer_models import fit_last_layer_closed_form, get_metrics_lli_closed_form, LLI, LastLayerVIClosedForm, LastLayerVIRidge, LastLayerVIHorseshoe
 
 from models.mc_dropout import fit_mc_dropout, get_metrics_mc_dropout, get_coverage_mc_dropout
 from models.bnn import fit_bnn, get_metrics_bnn
 from models.gibbs_sampler import gibbs_sampler, get_metrics_ridge, get_prediction_interval_coverage
-from models.vi import fit_vi_post_hoc, fit_vi_post_hoc, predictive_posterior, run_last_layer_vi_closed_form
+from models.vi import run_last_layer_vi_closed_form, run_last_layer_vi_ridge, run_last_layer_vi_horseshoe
 from models.sg_mcmc import train_sg_mcmc
 from tqdm import tqdm
 from scipy.stats import norm
@@ -54,6 +54,23 @@ logging.basicConfig(
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
+
+def load_backbone(params, logger):
+    ckpt_backbone = Path("./results/lli_closed_form_checkpoint.t7")
+    
+    if ckpt_backbone.is_file():
+        logger.info("Loading backbone...")
+        lli_net = LLI(params['model_dims'])
+        checkpoint = torch.load(ckpt_backbone)
+        lli_net.load_state_dict(checkpoint['model_state_dict'])
+        lli_net.eval()
+        logger.info("...backbone loaded.")
+
+        return lli_net
+    else:
+        Exception('Please train a backbone first by calling'
+                    + 'the script with method lli_closed_form.')
+
 
 
 def main() -> None:
@@ -176,7 +193,7 @@ def main() -> None:
 
 
     
-    elif params['method'] == 'lli_vi_closed_full_cov':
+    elif params['method'] == 'lli_closed_form':
         logger.info("Start training {params['method']}....")
         # fit model
         out_dict, net = fit_last_layer_closed_form(model_dims = params['model_dims'], 
@@ -221,20 +238,10 @@ def main() -> None:
     elif params['method'] == 'lli_gibbs_ridge':
 
         # load from checkpoint if we have trained a deep feature projector already.
-        ckpt_backbone = Path("./results/lli_vi_closed_full_cov_checkpoint.t7")
-        if ckpt_backbone.is_file():
-            logger.info("Loading backbone...")
-            lli_net = LLI(params['model_dims'])
-            checkpoint = torch.load(ckpt_backbone)
-            lli_net.load_state_dict(checkpoint['model_state_dict'])
-            lli_net.eval()
-            logger.info("...backbone loaded.")
-        else:
-            Exception('Please train a backbone first by calling'
-                       + 'the script with method lli_vi_closed_full_cov.')
-            
+        lli_net = load_backbone(params, logger)
+        
         with torch.no_grad():
-            Psi = lli_net.get_ll_embedd(xs_val).detach()
+            Psi = lli_net.get_ll_embedd(xs_train).detach()
 
         logger.info('Run Gibbs sampler...')
         w_sample, _, sigma_sq_sample = gibbs_sampler(Psi = Psi, 
@@ -275,12 +282,166 @@ def main() -> None:
 
         logger.info(f"... everything saved under {params['outpath']}.")
 
+    elif params['method'] == 'lli_vi_closed_form':
+
+        lli_net = load_backbone(params, logger)
+        
+        for param in lli_net.parameters():
+            param.requires_grad = False
+        with torch.no_grad():
+            Psi = lli_net.get_ll_embedd(xs_train)
+
+        logger.info('Run VI...')
+        last_layer_vi = LastLayerVIClosedForm(dim_last_layer=Psi.shape[1], dim_output=1)
+
+        last_layer_vi, elbos = run_last_layer_vi_closed_form(model = last_layer_vi, 
+                                    ys_train = ys_train, 
+                                    Psi = Psi, sigma_eps_sq = PARAMS_SYNTH['sigma_eps']**2, 
+                                    lr = 1e-2, temperature = 1, num_epochs = 1000)
+        logger.info('...finished.')
+        
+        logger.info('Predict on validation data....')
+        with torch.no_grad():
+            Psi_val = lli_net.get_ll_embedd(xs_train).detach()
+        
+        pred_mu = (Psi_val @  last_layer_vi.mu.T)
+        L  = last_layer_vi.get_L()
+        Z = Psi_val @ L.squeeze()  
+        pred_std = torch.sqrt((Z ** 2).sum(dim=1) + PARAMS_SYNTH['sigma_eps']**2)
+        logger.info('... finished.')
+
+        out_dict = {'pred_mu': pred_mu.detach().numpy(),
+                    'pred_sigma': pred_std.detach().numpy(),
+                    'elbos': elbos
+                    }
+        
+        logger.info('Get metrics...')
+        rmse_lli = (ys_val.reshape(-1,1) - pred_mu).pow(2).sqrt()
+        rmse_mean = rmse_lli.mean()
+        rmse_std = rmse_lli.std()
+        coverage = get_coverage_gaussian(pred_mean = pred_mu.detach().numpy(), 
+                                         pred_std = pred_std.detach().numpy(), 
+                                         y_true = ys_val.detach().numpy(), 
+                                         levels=PARAMS_SYNTH['CI_levels'])
+        logger.info('...finished.')
+
+        for key, value in zip(['rmse_mean', 'rmse_std', 'coverage'], [rmse_mean, rmse_std, coverage]):
+            out_dict[key] = value
+
+        with open(params['outpath'] / f"out_dict_{params['method']}.pkl", "wb") as f:
+            pickle.dump(out_dict, f)
+
+        logger.info(f"... everything saved under {params['outpath']}.")
+
+
     elif params['method'] == 'lli_vi_ridge':
-        pass
+        
+        lli_net = load_backbone(params, logger)
+        
+        for param in lli_net.parameters():
+            param.requires_grad = False
+        with torch.no_grad():
+            Psi = lli_net.get_ll_embedd(xs_train)
+
+        last_layer_vi = LastLayerVIRidge(in_features=Psi.shape[1], out_features=1)
+        optimizer_vi = torch.optim.Adam(last_layer_vi.parameters(), lr=1e-3)
+
+        logger.info('Run VI...')
+        last_layer_vi, elbos = run_last_layer_vi_ridge(model = last_layer_vi, 
+                                Psi = Psi, 
+                                ys_train = ys_train, 
+                                optimizer_vi = optimizer_vi, 
+                                num_epochs = 30000, 
+                                lr=1e-3)
+        logger.info('...finished.')
+        
+        logger.info('Predict on validation data....')
+        with torch.no_grad():
+            Psi_val = lli_net.get_ll_embedd(xs_val)
+            pred_mu = (Psi_val @  last_layer_vi.mu.T)
+            Sigma_q  = last_layer_vi.get_Sigma_q().squeeze()
+            Z = torch.diag(Psi_val @ torch.diag(Sigma_q[:Psi_val.shape[1]]) @ Psi_val.T)
+            pred_std = torch.sqrt(Z + PARAMS_SYNTH['sigma_eps']**2)
+        
+        logger.info('... finished.')
+
+        out_dict = {'pred_mu': pred_mu.detach().numpy(),
+                    'pred_sigma': pred_std.detach().numpy(),
+                    'elbos': elbos
+                    }
+        
+        logger.info('Get metrics...')
+        rmse_lli = (ys_val.reshape(-1,1) - pred_mu).pow(2).sqrt()
+        rmse_mean = rmse_lli.mean()
+        rmse_std = rmse_lli.std()
+        coverage = get_coverage_gaussian(pred_mean = pred_mu.detach().numpy(), 
+                                         pred_std = pred_std.detach().numpy(), 
+                                         y_true = ys_val.detach().numpy(), 
+                                         levels=PARAMS_SYNTH['CI_levels'])
+        logger.info('...finished.')
+
+        for key, value in zip(['rmse_mean', 'rmse_std', 'coverage'], [rmse_mean, rmse_std, coverage]):
+            out_dict[key] = value
+
+        with open(params['outpath'] / f"out_dict_{params['method']}.pkl", "wb") as f:
+            pickle.dump(out_dict, f)
+
+        logger.info(f"... everything saved under {params['outpath']}.")
+        
+        
+
+
 
     elif params['method'] == 'lli_vi_horseshoe':
+        lli_net = load_backbone(params, logger)
+        
+        for param in lli_net.parameters():
+            param.requires_grad = False
+        with torch.no_grad():
+            Psi = lli_net.get_ll_embedd(xs_train)
 
-        pass
+        last_layer_vi_hs = LastLayerVIHorseshoe(in_features=Psi.shape[1], out_features=1)
+        optimizer_vi = torch.optim.Adam(last_layer_vi_hs.parameters(), lr=1e-3)
+
+        logger.info('Run VI...')
+        last_layer_vi_hs, elbos = run_last_layer_vi_horseshoe(model = last_layer_vi_hs, 
+                                    Psi = Psi, 
+                                    ys_train = ys_train, 
+                                    optimizer_vi = optimizer_vi, num_epochs = 30000, lr=1e-3)
+        logger.info('...finished.')
+        
+        logger.info('Predict on validation data....')
+        with torch.no_grad():
+            Psi_val = lli_net.get_ll_embedd(xs_val)
+            pred_mu = (Psi_val @  last_layer_vi_hs.mu.T)
+            Sigma_q  = last_layer_vi_hs.get_Sigma_q().squeeze()
+            Z = torch.diag(Psi_val @ torch.diag(Sigma_q[:Psi_val.shape[1]]) @ Psi_val.T)
+            pred_std = torch.sqrt(Z + PARAMS_SYNTH['sigma_eps']**2)
+        logger.info('...finished.')
+
+        out_dict = {'pred_mu': pred_mu.detach().numpy(),
+                    'pred_sigma': pred_std.detach().numpy(),
+                    'elbos': elbos
+                    }
+
+        logger.info('Get metrics...')
+        rmse_lli = (ys_val.reshape(-1,1) - pred_mu).pow(2).sqrt()
+        rmse_mean = rmse_lli.mean()
+        rmse_std = rmse_lli.std()
+        coverage = get_coverage_gaussian(pred_mean = pred_mu.detach().numpy(), 
+                                         pred_std = pred_std.detach().numpy(), 
+                                         y_true = ys_val.detach().numpy(), 
+                                         levels=PARAMS_SYNTH['CI_levels'])
+        
+        logger.info('...finished.')
+
+        for key, value in zip(['rmse_mean', 'rmse_std', 'coverage'], [rmse_mean, rmse_std, coverage]):
+            out_dict[key] = value
+
+        with open(params['outpath'] / f"out_dict_{params['method']}.pkl", "wb") as f:
+            pickle.dump(out_dict, f)
+
+        logger.info(f"... everything saved under {params['outpath']}.")
 
     elif params['method'] == 'lli_vi_fac_ridge':
         pass
