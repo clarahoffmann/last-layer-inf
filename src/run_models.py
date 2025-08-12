@@ -15,7 +15,7 @@ import matplotlib.pyplot as plt
 from torch.utils.data import DataLoader, TensorDataset
 from numpy.lib.stride_tricks import sliding_window_view
 import torch.nn.functional as F
-from models.last_layer_models import fit_last_layer_closed_form, get_metrics_lli_closed_form
+from models.last_layer_models import fit_last_layer_closed_form, get_metrics_lli_closed_form, LLI
 
 from models.mc_dropout import fit_mc_dropout, get_metrics_mc_dropout, get_coverage_mc_dropout
 from models.bnn import fit_bnn, get_metrics_bnn
@@ -35,7 +35,17 @@ PARAMS_SYNTH = {'sigma_eps': 0.3,
                 'xs_range': [-4,4], 
                 'num_epochs': 100, 
                 'sigma_0': 0.3, 
-                'CI_levels': np.linspace(0.001, 0.99, 100)}
+                'CI_levels': np.linspace(0.001, 0.99, 100), 
+                'ys_grid': np.arange(-5,5, 100) # grid at which to evaluate samples of dens.
+                }
+
+PARAMS_RIDGE = {'a_sigma': 2,
+                'b_sigma': 2,
+                'a_tau': 2,
+                'b_tau': 2,
+                'num_iter': 1000,
+                'warm_up': 600,
+                }
 
 
 logging.basicConfig(
@@ -208,9 +218,64 @@ def main() -> None:
 
         logger.info(f"... everything saved under {params['outpath']}.")
 
-    elif params['method'] == 'lli_vi_ridge':
+    elif params['method'] == 'lli_gibbs_ridge':
+
+        # load from checkpoint if we have trained a deep feature projector already.
+        ckpt_backbone = Path("./results/lli_vi_closed_full_cov_checkpoint.t7")
+        if ckpt_backbone.is_file():
+            lli_net = LLI(params['model_dims'])
+            checkpoint = torch.load(ckpt_backbone)
+            lli_net.load_state_dict(checkpoint['model_state_dict'])
+            lli_net.eval()
+        else:
+            Exception('Please train a backbone first by calling'
+                       + 'the script with method lli_vi_closed_full_cov.')
+            
+        with torch.no_grad():
+            Psi = lli_net.get_ll_embedd(xs_val).detach()
+
+        w_sample, _, sigma_sq_sample = gibbs_sampler(Psi = Psi, 
+                                                    ys = ys_train, 
+                                                    a_tau = PARAMS_RIDGE['a_tau'], 
+                                                    b_tau = PARAMS_RIDGE['b_tau'], 
+                                                    a_sigma = PARAMS_RIDGE['a_sigma'], 
+                                                    b_sigma = PARAMS_RIDGE['b_sigma'], 
+                                                    num_iter = PARAMS_RIDGE['num_iter'], 
+                                                    warm_up = PARAMS_RIDGE['warm_up'])
+                                
+        out_dict = {'params': PARAMS_RIDGE,
+                    'w_sample': w_sample,
+                    'sigma_sq_sample': sigma_sq_sample}
         
-        pass
+        ys_grid = torch.arange(-5,5, .01)
+        Psi_pred = lli_net.get_ll_embedd(xs_val)
+
+        preds = {'mean': [],
+                'var': []}
+        for i in tqdm(range(Psi_pred.shape[0])):
+            pdf_gibbs_ridge , y_mean, y_var = get_pred_post_dist(Psi_pred[i], w_sample, sigma_sq_sample, ys_grid)
+            preds['mean'].append(y_mean)
+            preds['var'].append(y_var)
+
+        rmse_lli = (ys_val.reshape(-1,1) - torch.tensor(np.array(preds['mean']))).pow(2).sqrt()
+        rmse_lli_gibbs_mean = rmse_lli.mean()
+        rmse_ll_gibbs_std = rmse_lli.std()
+
+        coverage_gibbs_ridge = get_prediction_interval_coverage(ys_grid, ys_val, torch.tensor(pdf_gibbs_ridge), PARAMS_SYNTH['CI_levels'])
+
+        out_dict['rmse_mean'] = rmse_lli_gibbs_mean
+        out_dict['rmse_std'] = rmse_ll_gibbs_std
+        out_dict['pred_mu'] = np.array(preds['mean'])
+        out_dict['pred_std'] = np.sqrt(np.array(preds['var']))
+        out_dict['coverage'] = coverage_gibbs_ridge
+
+
+        with open(params['outpath'] / f"out_dict_{params['method']}.pkl", "wb") as f:
+            pickle.dump(out_dict, f)
+
+        logger.info(f"... everything saved under {params['outpath']}.")
+
+
     elif params['method'] == 'lli_vi_horseshoe':
         pass
 
@@ -220,7 +285,7 @@ def main() -> None:
     elif params['method'] == 'lli_vi_fac_horseshoe':
         pass
 
-    elif params['method'] == 'lli_gibbs_ridge':
+    elif params['method'] == 'lli_vi_ridge':
         pass
     
     else:
