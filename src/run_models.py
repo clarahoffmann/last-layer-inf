@@ -18,7 +18,7 @@ import torch.nn.functional as F
 from models.last_layer_models import fit_last_layer_closed_form, get_metrics_lli_closed_form
 
 from models.mc_dropout import fit_mc_dropout, get_metrics_mc_dropout, get_coverage_mc_dropout
-from models.bnn import BNN, train_bnn
+from models.bnn import fit_bnn, get_metrics_bnn
 from models.gibbs_sampler import gibbs_sampler, get_pred_post_dist, get_prediction_interval_coverage
 from models.vi import fit_vi_post_hoc, fit_vi_post_hoc, predictive_posterior, run_last_layer_vi_closed_form
 from models.sg_mcmc import train_sg_mcmc
@@ -135,7 +135,36 @@ def main() -> None:
        
 
     elif params['method'] == 'bnn':
-        pass
+        bnn, out_dict = fit_bnn(num_epochs = PARAMS_SYNTH['num_epochs']*2, 
+                                          xs_pred = xs_val,
+                                          dataloader_train = dataloader_train, 
+                                          dataloader_val = dataloader_val)
+        
+        bnn_samples, rmse_bnn_mean, rmse_bnn_std = get_metrics_bnn(bnn = bnn, xs_val = xs_val, ys_val = ys_val)
+
+        coverage = get_coverage_y_hats(y_samples = torch.stack(bnn_samples).squeeze(), 
+                                        y_true = ys_val, 
+                                        levels = PARAMS_SYNTH['CI_levels'])
+
+        # save
+        out_dict['rmse_mean'] = rmse_bnn_mean, 
+        out_dict['rmse_std'] = rmse_bnn_std,
+        out_dict['coverage'] = coverage
+
+        torch.save(
+            {
+                "model_state_dict": bnn.state_dict(),
+            },
+           params['outpath'] / f"{params['method']}_checkpoint.t7"
+        )
+
+        with open(params['outpath'] / f"out_dict_{params['method']}.pkl", "wb") as f:
+            pickle.dump(out_dict, f)
+
+        logger.info(f"... everything saved under {params['outpath']}.")
+
+
+
     
     elif params['method'] == 'lli_vi_closed_full_cov':
         logger.info("Start training {params['method']}....")
@@ -180,6 +209,7 @@ def main() -> None:
         logger.info(f"... everything saved under {params['outpath']}.")
 
     elif params['method'] == 'lli_vi_ridge':
+        
         pass
     elif params['method'] == 'lli_vi_horseshoe':
         pass

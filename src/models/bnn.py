@@ -5,21 +5,34 @@ import torch.nn as nn
 from tqdm import tqdm
 
 
-@variational_estimator
-class BNN(nn.Module):
+
+"""class BNN(nn.Module):
     def __init__(self, dims):
         super().__init__()
         self.fc = nn.Sequential(
             *[
                 layer
                 for in_dim, out_dim in zip(dims[:-2], dims[1:-1])
-                for layer in (nn.BayesianLinear(in_dim, out_dim), nn.ReLU(), nn.Dropout(p=p))
+                for layer in (BayesianLinear(in_dim, out_dim), nn.ReLU())
             ],
             nn.Linear(dims[-2], dims[-1])
         )
 
     def forward(self, x):
-        x = self.f(x)
+        x = self.fc(x)
+        return x"""
+
+@variational_estimator
+class BNN(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.blinear1 = BayesianLinear(1, 100)
+        self.ReLU = nn.ReLU()
+        self.blinear2 = BayesianLinear(100, 1)
+
+    def forward(self, x):
+        x = self.ReLU(self.blinear1(x))
+        x = self.blinear2(x)
         return x
     
 def train_bnn(model, num_epochs, dataloader_train, dataloader_val):
@@ -63,14 +76,43 @@ def train_bnn(model, num_epochs, dataloader_train, dataloader_val):
     return model, losses_train, losses_val
 
 
-def train_bnn(model_dims, num_epochs, dataloader_train, dataloader_val):
-    bnn = BNN(model_dims)
+def fit_bnn(num_epochs, xs_pred,  dataloader_train, dataloader_val):
+    bnn = BNN()
     bnn, losses_train, losses_val = train_bnn(model = bnn, 
                                           num_epochs = num_epochs*2, 
                                           dataloader_train = dataloader_train, 
                                           dataloader_val = dataloader_val)
     
-    return bnn, losses_train, losses_val
+    bnn_samples = []
+    with torch.no_grad():
+        preds = [bnn(xs_pred) for _ in range(100)]  # 100 MC samples
+        preds = torch.stack(preds)
+        bnn_pred_mu = preds.mean(dim=0).squeeze()
+        bnn_pred_std = preds.std(dim=0).squeeze()
+        bnn_samples.append(preds)
+    
+    out_dict = {'pred_mu': bnn_pred_mu,
+           'pred_sigma': bnn_pred_std,
+           'losses_train': losses_train,
+           'losses_val': losses_val,
+           }
+    
+    return bnn.eval(), out_dict
+    
 
+def get_metrics_bnn(bnn, xs_val, ys_val):
+    bnn_samples = []
+    with torch.no_grad():
+        preds = [bnn(xs_val) for _ in range(100)]  # 100 MC samples
+        preds = torch.stack(preds)
+        bnn_pred_mu = preds.mean(dim=0).squeeze()
+        bnn_pred_std = preds.std(dim=0).squeeze()
+        bnn_samples.append(preds)
+
+    rmse_bnn = (ys_val.reshape(-1,1) - bnn_pred_mu).pow(2).sqrt()
+    rmse_bnn_mean = rmse_bnn.mean()
+    rmse_bnn_std = rmse_bnn.std()
+
+    return bnn_samples, rmse_bnn_mean, rmse_bnn_std
 
 
