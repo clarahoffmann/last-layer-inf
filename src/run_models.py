@@ -265,11 +265,10 @@ def main() -> None:
                                                                 p_hats = torch.tensor(pdf_gibbs_ridge), 
                                                                 levels = PARAMS_SYNTH['CI_levels'])
 
-        out_dict['rmse_mean'] = rmse_lli_gibbs_mean
-        out_dict['rmse_std'] = rmse_ll_gibbs_std
-        out_dict['pred_mu'] = np.array(pred_mu)
-        out_dict['pred_std'] = np.sqrt(np.array(pred_std))
-        out_dict['coverage'] = coverage_gibbs_ridge
+        for key, value in zip(['rmse_mean', 'rmse_std', 'pred_mu', 'pred_std', 'coverage'], 
+                              [rmse_lli_gibbs_mean, rmse_ll_gibbs_std, np.array(pred_mu),np.sqrt(np.array(pred_std)),
+                                coverage_gibbs_ridge]):
+            out_dict[key] = value
 
         with open(params['outpath'] / f"out_dict_{params['method']}.pkl", "wb") as f:
             pickle.dump(out_dict, f)
