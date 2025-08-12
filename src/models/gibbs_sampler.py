@@ -96,7 +96,7 @@ def get_pred_post_dist(psi, w_sample, sigma_sq_sample, ys_grid):
 
     return p_hats.detach().numpy(), y_mean.detach().numpy(), y_var.detach().numpy()
 
-def get_prediction_interval_coverage(ys_grid, ys, p_hats, levels):
+def get_prediction_interval_coverage(ys_grid, ys_true, p_hats, levels):
 
     empirical_coverage = []
     
@@ -124,10 +124,26 @@ def get_prediction_interval_coverage(ys_grid, ys, p_hats, levels):
         lower_bound = ys_grid[lower_idx]
         upper_bound = ys_grid[upper_idx]
 
-        covered = ((ys >= lower_bound) & (ys <= upper_bound)).float().mean().item()
+        covered = ((ys_true >= lower_bound) & (ys_true <= upper_bound)).float().mean().item()
 
         empirical_coverage.append(covered)
     
     return np.array(empirical_coverage)
 
+def get_metrics_ridge(model, xs_val, ys_val,  w_sample, sigma_sq_sample, ys_grid):
+        ys_grid = torch.arange(-5,5, .01)
+        Psi_pred = model.get_ll_embedd(xs_val)
+
+        preds = {'mean': [],
+                'var': []}
+        for i in tqdm(range(Psi_pred.shape[0])):
+            pdf_gibbs_ridge , y_mean, y_var = get_pred_post_dist(Psi_pred[i], w_sample, sigma_sq_sample, ys_grid)
+            preds['mean'].append(y_mean)
+            preds['var'].append(y_var)
+
+        rmse_lli = (ys_val.reshape(-1,1) - torch.tensor(np.array(preds['mean']))).pow(2).sqrt()
+        rmse_lli_gibbs_mean = rmse_lli.mean()
+        rmse_ll_gibbs_std = rmse_lli.std()
+
+        return pdf_gibbs_ridge, rmse_lli_gibbs_mean, rmse_ll_gibbs_std, preds['mean'], preds['var']
 

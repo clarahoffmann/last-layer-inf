@@ -19,7 +19,7 @@ from models.last_layer_models import fit_last_layer_closed_form, get_metrics_lli
 
 from models.mc_dropout import fit_mc_dropout, get_metrics_mc_dropout, get_coverage_mc_dropout
 from models.bnn import fit_bnn, get_metrics_bnn
-from models.gibbs_sampler import gibbs_sampler, get_pred_post_dist, get_prediction_interval_coverage
+from models.gibbs_sampler import gibbs_sampler, get_metrics_ridge, get_prediction_interval_coverage
 from models.vi import fit_vi_post_hoc, fit_vi_post_hoc, predictive_posterior, run_last_layer_vi_closed_form
 from models.sg_mcmc import train_sg_mcmc
 from tqdm import tqdm
@@ -36,7 +36,7 @@ PARAMS_SYNTH = {'sigma_eps': 0.3,
                 'num_epochs': 100, 
                 'sigma_0': 0.3, 
                 'CI_levels': np.linspace(0.001, 0.99, 100), 
-                'ys_grid': np.arange(-5,5, 100) # grid at which to evaluate samples of dens.
+                'ys_grid': torch.arange(-5,5, 0.01) # grid at which to evaluate samples of dens.
                 }
 
 PARAMS_RIDGE = {'a_sigma': 2,
@@ -223,10 +223,12 @@ def main() -> None:
         # load from checkpoint if we have trained a deep feature projector already.
         ckpt_backbone = Path("./results/lli_vi_closed_full_cov_checkpoint.t7")
         if ckpt_backbone.is_file():
+            logger.info("Loading backbone...")
             lli_net = LLI(params['model_dims'])
             checkpoint = torch.load(ckpt_backbone)
             lli_net.load_state_dict(checkpoint['model_state_dict'])
             lli_net.eval()
+            logger.info("...backbone loaded.")
         else:
             Exception('Please train a backbone first by calling'
                        + 'the script with method lli_vi_closed_full_cov.')
@@ -234,6 +236,7 @@ def main() -> None:
         with torch.no_grad():
             Psi = lli_net.get_ll_embedd(xs_val).detach()
 
+        logger.info('Run Gibbs sampler...')
         w_sample, _, sigma_sq_sample = gibbs_sampler(Psi = Psi, 
                                                     ys = ys_train, 
                                                     a_tau = PARAMS_RIDGE['a_tau'], 
@@ -242,41 +245,42 @@ def main() -> None:
                                                     b_sigma = PARAMS_RIDGE['b_sigma'], 
                                                     num_iter = PARAMS_RIDGE['num_iter'], 
                                                     warm_up = PARAMS_RIDGE['warm_up'])
+        logger.info('... finished.')
                                 
         out_dict = {'params': PARAMS_RIDGE,
                     'w_sample': w_sample,
                     'sigma_sq_sample': sigma_sq_sample}
         
-        ys_grid = torch.arange(-5,5, .01)
-        Psi_pred = lli_net.get_ll_embedd(xs_val)
+        logger.info("...computing RMSE...")
+        pdf_gibbs_ridge, rmse_lli_gibbs_mean, rmse_ll_gibbs_std, pred_mu, pred_std = get_metrics_ridge(model = lli_net, 
+                                                                                    xs_val = xs_val, 
+                                                                                    ys_val = ys_val,  
+                                                                                    w_sample = w_sample, 
+                                                                                    sigma_sq_sample = sigma_sq_sample, 
+                                                                                    ys_grid = PARAMS_SYNTH['ys_grid'])
 
-        preds = {'mean': [],
-                'var': []}
-        for i in tqdm(range(Psi_pred.shape[0])):
-            pdf_gibbs_ridge , y_mean, y_var = get_pred_post_dist(Psi_pred[i], w_sample, sigma_sq_sample, ys_grid)
-            preds['mean'].append(y_mean)
-            preds['var'].append(y_var)
-
-        rmse_lli = (ys_val.reshape(-1,1) - torch.tensor(np.array(preds['mean']))).pow(2).sqrt()
-        rmse_lli_gibbs_mean = rmse_lli.mean()
-        rmse_ll_gibbs_std = rmse_lli.std()
-
-        coverage_gibbs_ridge = get_prediction_interval_coverage(ys_grid, ys_val, torch.tensor(pdf_gibbs_ridge), PARAMS_SYNTH['CI_levels'])
+        logger.info("...computing prediction intervals and coverage...")
+        coverage_gibbs_ridge = get_prediction_interval_coverage(ys_grid = PARAMS_SYNTH['ys_grid'],
+                                                                ys_true =ys_val,
+                                                                p_hats = torch.tensor(pdf_gibbs_ridge), 
+                                                                levels = PARAMS_SYNTH['CI_levels'])
 
         out_dict['rmse_mean'] = rmse_lli_gibbs_mean
         out_dict['rmse_std'] = rmse_ll_gibbs_std
-        out_dict['pred_mu'] = np.array(preds['mean'])
-        out_dict['pred_std'] = np.sqrt(np.array(preds['var']))
+        out_dict['pred_mu'] = np.array(pred_mu)
+        out_dict['pred_std'] = np.sqrt(np.array(pred_std))
         out_dict['coverage'] = coverage_gibbs_ridge
-
 
         with open(params['outpath'] / f"out_dict_{params['method']}.pkl", "wb") as f:
             pickle.dump(out_dict, f)
 
         logger.info(f"... everything saved under {params['outpath']}.")
 
+    elif params['method'] == 'lli_vi_ridge':
+        pass
 
     elif params['method'] == 'lli_vi_horseshoe':
+
         pass
 
     elif params['method'] == 'lli_vi_fac_ridge':
@@ -285,8 +289,7 @@ def main() -> None:
     elif params['method'] == 'lli_vi_fac_horseshoe':
         pass
 
-    elif params['method'] == 'lli_vi_ridge':
-        pass
+    
     
     else:
         ValueError('Please provide a valid method from: \n mc_dropout, bnn, ' \
