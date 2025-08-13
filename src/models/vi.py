@@ -7,6 +7,20 @@ from typing import Tuple, Literal
 from scipy.special import gammaln
 from torch.optim import Adam
 
+def kl_w_vectorized_full_cov(mu_samples, Sigma_q, tau_sq_samples):
+    L = Sigma_q.shape[0]
+    
+    # log determinant of Sigma_q
+    logdet_Sigma = torch.logdet(Sigma_q + 1e-5 * torch.eye(L))
+    
+    # trace of Sigma_q / tau_sq_samples
+    trace_term = torch.trace(Sigma_q) / tau_sq_samples
+    mu_norm_sq = torch.sum(mu_samples**2, dim=1) / tau_sq_samples
+    log_tau_sq = torch.log(tau_sq_samples)
+    
+    kl = 0.5 * (trace_term + mu_norm_sq - L + L * log_tau_sq - logdet_Sigma)
+    
+    return kl.mean()
 
 def kl_w_vectorized(mu, Sigma_q, tau_sq_samples):
     _, L = mu.shape
@@ -101,7 +115,7 @@ def run_last_layer_vi_closed_form(model, ys_train, Psi, sigma_eps_sq, lr = 1e-2,
     return model, elbos
 
 
-def run_last_layer_vi_ridge(model, Psi, ys_train, optimizer_vi, num_epochs = 30000, lr=1e-3):
+def run_last_layer_vi_ridge(model, Psi, ys_train, optimizer_vi, num_epochs = 30000):
 
     N, _ = Psi.shape
 
@@ -217,6 +231,60 @@ def run_last_layer_vi_horseshoe(model, Psi, ys_train, optimizer_vi, num_epochs =
         optimizer_vi.step()
 
         if epoch % 100== 0:
+            print(f"VI epoch {epoch} ELBO: {elbo.item():.3f}")
+
+        elbos.append(elbo.item())
+
+    return model, elbos
+
+
+def run_last_layer_vi_ridge_full_fac(model, Psi, ys_train, optimizer_vi, num_epochs = 20000):
+
+    elbos = []
+    N, _ = Psi.shape
+    for epoch in range(num_epochs):
+        optimizer_vi.zero_grad()
+        
+        # forward pass
+        params_samples, params, y_sample, Sigma_q = model.forward(Psi)
+
+        # sample parameters
+        w_samples = params_samples[:, :model.in_features]
+        tau_sq_samples = torch.nn.functional.softplus(params_samples[:, -2]) + 1e-5
+        sigma_eps_sq_samples = (torch.nn.functional.softplus(params_samples[:, -1]) + 1e-5) #.unsqueeze(0)
+
+        # variational means
+        q_w_mu = params[:, :model.in_features]
+        q_log_tau_sq_mu = params[:, -2]
+        q_log_sigma_eps_sq_mu = params[:, -1]
+
+        # variances from Sigma_q
+        q_log_tau_sq_var = Sigma_q[-2, -2]
+        q_log_sigma_eps_sq_var = Sigma_q[-1, -1]
+
+        # likelihood
+        log_likelihood = -0.5 * N * torch.log(sigma_eps_sq_samples) \
+                        -0.5 * torch.sum((ys_train.squeeze().unsqueeze(0) - y_sample)**2, dim = 1) / sigma_eps_sq_samples
+        log_likelihood = log_likelihood.mean()
+
+        # KL terms
+        kl_w = kl_w_vectorized_full_cov(w_samples, Sigma_q[:model.in_features, :model.in_features], tau_sq_samples)
+        
+        q_log_pdf_eps = q_log_pdf_lognormal(sigma_eps_sq_samples, q_log_sigma_eps_sq_mu, q_log_sigma_eps_sq_var)
+        kl_sigma_eps = kl_sigma_eps_sq(q_log_pdf_eps, sigma_eps_sq_samples, a_sigma=2, b_sigma=2)
+        
+        q_log_pdf_tau = q_log_pdf_lognormal(tau_sq_samples, q_log_tau_sq_mu, q_log_tau_sq_var)
+        kl_tau = kl_tau_sq(q_log_pdf_tau, tau_sq_samples, a_tau=2, b_tau=2)
+
+        # ELBO
+        elbo = log_likelihood - kl_sigma_eps - kl_tau - kl_w
+        loss = -elbo
+
+        # backward
+        loss.backward()
+        optimizer_vi.step()
+
+        if epoch % 1000 == 0:
             print(f"VI epoch {epoch} ELBO: {elbo.item():.3f}")
 
         elbos.append(elbo.item())
