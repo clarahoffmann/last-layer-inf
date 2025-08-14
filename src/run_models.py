@@ -15,12 +15,12 @@ import matplotlib.pyplot as plt
 from torch.utils.data import DataLoader, TensorDataset
 from numpy.lib.stride_tricks import sliding_window_view
 import torch.nn.functional as F
-from models.last_layer_models import fit_last_layer_closed_form, get_metrics_lli_closed_form, LLI, LastLayerVIClosedForm, LastLayerVIRidge, LastLayerVIHorseshoe, LastLayerVIRidgeFullCov
+from models.last_layer_models import fit_last_layer_closed_form, get_metrics_lli_closed_form, LLI, LastLayerVIClosedForm, LastLayerVIRidge, LastLayerVIHorseshoe, LastLayerVIRidgeFullCov, LastLayerVIHorseshoeFullCov
 
 from models.mc_dropout import fit_mc_dropout, get_metrics_mc_dropout, get_coverage_mc_dropout
 from models.bnn import fit_bnn, get_metrics_bnn
 from models.gibbs_sampler import gibbs_sampler, get_metrics_ridge, get_prediction_interval_coverage
-from models.vi import run_last_layer_vi_closed_form, run_last_layer_vi_ridge, run_last_layer_vi_horseshoe, run_last_layer_vi_ridge_full_fac
+from models.vi import run_last_layer_vi_closed_form, run_last_layer_vi_ridge, run_last_layer_vi_horseshoe, run_last_layer_vi_ridge_full_fac, run_last_layer_vi_horseshoe_full_fac
 from models.sg_mcmc import train_sg_mcmc
 from tqdm import tqdm
 from scipy.stats import norm
@@ -374,8 +374,7 @@ def main() -> None:
                                 Psi = Psi, 
                                 ys_train = ys_train, 
                                 optimizer_vi = optimizer_vi, 
-                                num_epochs = 30000, 
-                                lr=1e-3)
+                                num_epochs = 30000)
         logger.info('...finished.')
         
         logger.info('Predict on validation data....')
@@ -384,7 +383,7 @@ def main() -> None:
             pred_mu = (Psi_val @  last_layer_vi.mu.T)
             Sigma_q  = last_layer_vi.get_Sigma_q().squeeze()
             Z = torch.diag(Psi_val @ torch.diag(Sigma_q[:Psi_val.shape[1]]) @ Psi_val.T)
-            pred_std = torch.sqrt(Z + PARAMS_SYNTH['sigma_eps']**2)
+            pred_std = torch.sqrt(Z + torch.exp(last_layer_vi.log_sigma_eps_sq))
         
         logger.info('... finished.')
 
@@ -439,7 +438,7 @@ def main() -> None:
             pred_mu = (Psi_val @  last_layer_vi_hs.mu.T)
             Sigma_q  = last_layer_vi_hs.get_Sigma_q().squeeze()
             Z = torch.diag(Psi_val @ torch.diag(Sigma_q[:Psi_val.shape[1]]) @ Psi_val.T)
-            pred_std = torch.sqrt(Z + PARAMS_SYNTH['sigma_eps']**2)
+            pred_std = torch.sqrt(Z  + torch.exp(last_layer_vi_hs.log_sigma_eps_sq_mu)) #+ PARAMS_SYNTH['sigma_eps'
         logger.info('...finished.')
 
         out_dict = {'pred_mu': pred_mu.detach().numpy(),
@@ -490,7 +489,7 @@ def main() -> None:
             Sigma_q, _, _ = last_layer_vi.get_Sigma_q()
             Sigma_w = Sigma_q[:L, :L]
             Z = torch.diag(Psi_val @ Sigma_w @ Psi_val.T) + 1e-6
-            pred_std = torch.sqrt(Z + PARAMS_SYNTH['sigma_eps']**2)
+            pred_std = torch.sqrt(Z + torch.exp(last_layer_vi.log_sigma_eps_sq))
         logger.info('...finished.')
 
         out_dict = {'pred_mu': pred_mu.detach().numpy(),
@@ -518,10 +517,59 @@ def main() -> None:
         logger.info(f"... everything saved under {params['outpath']}.")
 
 
-    elif params['method'] == 'lli_vi_fac_horseshoe':
-        pass
+    elif params['method'] == 'lli_vi_horseshoe_full_fac':
+        lli_net = load_backbone(params, logger)
+        
+        for param in lli_net.parameters():
+            param.requires_grad = False
+        with torch.no_grad():
+            Psi = lli_net.get_ll_embedd(xs_train)
 
-    
+        logger.info('here')
+        
+        last_layer_vi = LastLayerVIHorseshoeFullCov(in_features=Psi.shape[1], out_features=1, rank_B = 15)
+        optimizer_vi = torch.optim.Adam(last_layer_vi.parameters(), lr=1e-3)
+
+        logger.info(f'Run VI...{Psi.shape}')
+        last_layer_vi, elbos = run_last_layer_vi_horseshoe_full_fac(last_layer_vi, Psi, ys_train, optimizer_vi, num_epochs = 80000)
+        logger.info('...finished')
+
+        logger.info('Predict on validation data....')
+        with torch.no_grad():
+            Psi_val = lli_net.get_ll_embedd(xs_val)
+            pred_mu = (Psi_val @ last_layer_vi.mu.T).detach().numpy().squeeze()
+            Sigma_q, _, _ = last_layer_vi.get_Sigma_q()
+            L = last_layer_vi.in_features
+            Sigma_w = Sigma_q[:L, :L]
+            Z = torch.sum((Psi_val @ Sigma_w) * Psi_val, dim=1)
+            #sigma_eps_sq = torch.exp(last_layer_vi.log_sigma_eps_sq_mu).squeeze() 
+            pred_std = torch.sqrt( Z + + PARAMS_SYNTH['sigma_eps']).detach().numpy()
+        logger.info('...finished.')
+
+        out_dict = {'pred_mu': pred_mu,
+                    'pred_sigma': pred_std,
+                    'elbos': elbos
+                    }
+
+        logger.info('Get metrics...')
+        rmse_lli = (ys_val.reshape(-1,1) - pred_mu).pow(2).sqrt()
+        rmse_mean = rmse_lli.mean().item()
+        rmse_std = rmse_lli.std().item()
+        coverage = get_coverage_gaussian(pred_mean = pred_mu, 
+                                         pred_std = pred_std, 
+                                         y_true = ys_val.detach().numpy(), 
+                                         levels=PARAMS_SYNTH['CI_levels'])
+        logger.info('...finished.')
+        
+        for key, value in zip(['rmse_mean', 'rmse_std', 'coverage'], [rmse_mean, rmse_std, coverage]):
+            out_dict[key] = value
+
+        with open(params['outpath'] / f"out_dict_{params['method']}.pkl", "wb") as f:
+            pickle.dump(out_dict, f)
+
+        logger.info(f"... everything saved under {params['outpath']}.")
+
+
     
     else:
         ValueError('Please provide a valid method from: \n mc_dropout, bnn, ' \
