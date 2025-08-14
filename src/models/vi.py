@@ -6,6 +6,7 @@ from tqdm import tqdm
 from typing import Tuple, Literal
 from scipy.special import gammaln
 from torch.optim import Adam
+from torch.distributions import LowRankMultivariateNormal
 
 def kl_w_vectorized_full_cov(mu_samples, Sigma_q, tau_sq_samples):
     L = Sigma_q.shape[0]
@@ -64,8 +65,27 @@ def log_p_sigma_eps_sq_ig(sigma_eps_sq, a_sigma, b_sigma):
 def kl_sigma_eps_sq(q_log_pdf, sigma_eps_sq_samples, a_sigma, b_sigma):
     log_prior = log_p_sigma_eps_sq_ig(sigma_eps_sq_samples, a_sigma, b_sigma)
     return (q_log_pdf - log_prior).mean()
-    
 
+def kl_sigma_eps_sq_hs(q_log_pdf, sigma_eps_sq_samples, a_sigma, b_sigma):
+    log_prior = log_p_sigma_eps_sq_ig(sigma_eps_sq_samples, a_sigma, b_sigma)
+    return (q_log_pdf - log_prior).mean()
+
+def kl_full_cov_w_hs(mu_w, Sigma_w, lambda_vec, L):
+
+    inv_Lambda = torch.diag(1.0 / (lambda_vec**2))
+    term_trace = torch.trace(inv_Lambda @ Sigma_w)
+    diff_inv = mu_w.unsqueeze(0).squeeze()  @ inv_Lambda                  
+    term_quad = torch.sum(diff_inv * mu_w.unsqueeze(0).squeeze() , dim=1) 
+    term_logdet = torch.logdet(torch.diag(lambda_vec**2)) - torch.logdet(Sigma_w + 1e-6*torch.eye(L))
+    kl = 0.5 * (term_trace + term_quad - L + term_logdet)
+    return kl.mean()
+
+
+def kl_lambda_hs(q_log_pdf_loglambda, lambda_samples):
+    log_prior_hc = torch.sum(torch.log(2.0 / (torch.pi * (1.0 + lambda_samples**2))), dim=-1)
+    log_jacobian = torch.sum(torch.log(lambda_samples), dim=-1)
+    kl = q_log_pdf_loglambda - log_prior_hc - log_jacobian
+    return kl.mean()
 
 def predictive_posterior(Psi: torch.Tensor, mu: torch.Tensor, 
                          Sigma_w: torch.Tensor, sigma_eps_sq: torch.Tensor):
@@ -74,6 +94,7 @@ def predictive_posterior(Psi: torch.Tensor, mu: torch.Tensor,
     pred_var = sigma_eps_sq + (Psi @ Sigma_w @ Psi.T)
 
     return pred_mean.detach().numpy(), pred_var.detach().numpy()
+
 
 def run_last_layer_vi_closed_form(model, ys_train, Psi, sigma_eps_sq, lr = 1e-2, temperature = 1, num_epochs = 1000):
 
@@ -179,7 +200,7 @@ def run_last_layer_vi_horseshoe(model, Psi, ys_train, optimizer_vi, num_epochs =
 
         # Sample of.
         # last-layer weights
-        w_samples = params_samples[:, :model.in_features]
+        #w_samples = params_samples[:, :model.in_features]
         # variance of obs. noise 
         sigma_eps_sq_samples = torch.exp(params_samples[:, -1]) + 1e-5 
         # Local shrinkage
@@ -216,9 +237,9 @@ def run_last_layer_vi_horseshoe(model, Psi, ys_train, optimizer_vi, num_epochs =
         kl_lambda = torch.sum((q_log_pdf_lambda - log_p_lambda).mean(dim=0))
 
         # KL term for sigma_eps_sq
-        q_log_pdf_sigma_eps = q_log_pdf_lognormal(sigma_eps_sq_samples,
-                                                q_log_sigma_eps_sq_mu,
-                                                q_log_sigma_eps_sq_var)
+        #q_log_pdf_sigma_eps = q_log_pdf_lognormal(sigma_eps_sq_samples,
+        #                                        q_log_sigma_eps_sq_mu,
+        #                                        q_log_sigma_eps_sq_var)
         
         q_log_pdf_normal_value_eps = q_log_pdf_lognormal(sigma_eps_sq_samples, q_log_sigma_eps_sq_mu, q_log_sigma_eps_sq_var)
         kl_sigma_eps_sq_value = kl_sigma_eps_sq(q_log_pdf_normal_value_eps, sigma_eps_sq_samples, 2, 2)
@@ -254,7 +275,6 @@ def run_last_layer_vi_ridge_full_fac(model, Psi, ys_train, optimizer_vi, num_epo
         sigma_eps_sq_samples = (torch.nn.functional.softplus(params_samples[:, -1]) + 1e-5) #.unsqueeze(0)
 
         # variational means
-        q_w_mu = params[:, :model.in_features]
         q_log_tau_sq_mu = params[:, -2]
         q_log_sigma_eps_sq_mu = params[:, -1]
 
@@ -285,6 +305,63 @@ def run_last_layer_vi_ridge_full_fac(model, Psi, ys_train, optimizer_vi, num_epo
         optimizer_vi.step()
 
         if epoch % 1000 == 0:
+            print(f"VI epoch {epoch} ELBO: {elbo.item():.3f}")
+
+        elbos.append(elbo.item())
+
+    return model, elbos
+
+def run_last_layer_vi_horseshoe_full_fac(model, Psi, ys_train, optimizer_vi, num_epochs = 15000):
+    N, L = Psi.shape
+    elbos = []
+    for epoch in range(num_epochs):
+        optimizer_vi.zero_grad()
+        
+        params_samples, params, y_sample, Sigma_q, B, D = model.forward(Psi)
+
+        # Samples
+        w_samples = params_samples[:, :model.in_features]
+        sigma_eps_sq_samples = torch.exp(params_samples[:, -1]) + 1e-5
+        lambda_samples = torch.exp(params_samples[:, model.in_features:-1]) + 1e-5
+
+        # Variational means/vars
+        q_lambda_mu = params[:, model.in_features:-1]
+        q_log_sigma_eps_sq_mu = params[:, -1]
+        q_log_sigma_eps_sq_var = Sigma_q[-1, -1]
+        Sigma_w = Sigma_q[:model.in_features, :model.in_features]
+
+        # Likelihood
+        log_likelihood = (
+            -0.5 * N * torch.log(sigma_eps_sq_samples.unsqueeze(0))
+            -0.5 * torch.sum((ys_train.squeeze().unsqueeze(0) - y_sample) ** 2, dim = 1) / sigma_eps_sq_samples.unsqueeze(0))
+        ll_term = log_likelihood.sum(dim=0).mean()
+
+        # KLs
+        # some variables we need
+        lambda_start = model.in_features
+        lambda_end = 2*lambda_start
+        B_lambda = B[lambda_start:lambda_end,:]
+        D_lambda = D[lambda_start:lambda_end].unsqueeze(0)
+        q_lambda_dist = LowRankMultivariateNormal(
+            loc=q_lambda_mu, 
+            cov_factor=B_lambda, 
+            cov_diag=D_lambda
+        )
+        q_log_pdf_lambda = q_lambda_dist.log_prob(torch.log(lambda_samples))
+        q_log_pdf_normal_value_eps = q_log_pdf_lognormal(sigma_eps_sq_samples, q_log_sigma_eps_sq_mu, q_log_sigma_eps_sq_var)
+        # actuak KLs
+        kl_w = kl_full_cov_w_hs(w_samples, Sigma_w, torch.exp(q_lambda_mu.squeeze() + 1e-5), L)
+        kl_lambda = kl_lambda_hs(q_log_pdf_lambda, lambda_samples)
+        kl_sigma_eps_sq_value = kl_sigma_eps_sq_hs(q_log_pdf_normal_value_eps, sigma_eps_sq_samples, 2, 2)
+
+        # ELBO
+        elbo = ll_term  - kl_sigma_eps_sq_value - kl_lambda -  kl_w
+        loss = -elbo
+
+        loss.backward()
+        optimizer_vi.step()
+
+        if epoch % 100== 0:
             print(f"VI epoch {epoch} ELBO: {elbo.item():.3f}")
 
         elbos.append(elbo.item())
