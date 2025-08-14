@@ -316,3 +316,46 @@ class LastLayerVIRidgeFullCov(nn.Module):
         y_sample = (params_samples[:, :self.in_features] @ X.T)
         
         return params_samples, params, y_sample, Sigma_q
+
+class LastLayerVIHorseshoeFullCov(nn.Module):
+    def __init__(self, in_features, out_features, rank_B):
+        super().__init__()
+        self.in_features = in_features
+        self.out_features = out_features
+        self.q_dim = in_features*2 + 1
+        self.rank_B = rank_B
+        
+        
+        self.mu = nn.Parameter(torch.zeros(out_features, in_features))
+        self.log_lambda_mu = nn.Parameter(torch.ones(out_features, in_features)*0.01)
+        self.log_sigma_eps_sq_mu = nn.Parameter(torch.zeros(out_features, 1))
+
+        self.cov_factor=nn.Parameter(torch.ones(self.q_dim, self.rank_B)*0.01)
+        self.cov_diag=nn.Parameter(torch.zeros(1, self.q_dim))
+
+    def get_B(self, B_unconstrained):
+            mask = torch.tril(torch.ones(self.q_dim, self.rank_B))
+            B = B_unconstrained * mask
+            return B
+    
+
+    def get_Sigma_q(self):
+        B = self.get_B(self.cov_factor)
+        D = (torch.exp(self.cov_diag) + 1e-5).squeeze()
+        Sigma_q = B @ B.T + D
+
+        return Sigma_q, B, D
+    
+    def forward(self, X, S = 5):
+        params = torch.cat([self.mu, self.log_lambda_mu, self.log_sigma_eps_sq_mu], dim = -1 )
+        Sigma_q, B, D = self.get_Sigma_q()
+        D_sqrt = torch.sqrt(D).squeeze()
+
+        t = torch.randn(S, self.rank_B)
+        eps = torch.randn(S, self.q_dim)
+
+        params_samples = params + t @ B.T + D_sqrt*eps 
+
+        y_sample = (params_samples[:, :self.in_features] @ X.T)
+        
+        return params_samples, params, y_sample, Sigma_q, B, D
