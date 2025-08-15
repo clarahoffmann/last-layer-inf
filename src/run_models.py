@@ -282,13 +282,13 @@ def main() -> None:
                     'sigma_sq_sample': sigma_sq_sample}
         
         logger.info("...computing RMSE...")
-        pdf_gibbs_ridge, rmse_lli_gibbs_mean, rmse_ll_gibbs_std, pred_mu, pred_std = get_metrics_ridge(model = lli_net, 
+        pdf_gibbs_ridge, rmse_lli_gibbs_mean, rmse_ll_gibbs_std, pred_mu, pred_var = get_metrics_ridge(model = lli_net, 
                                                                                     xs_val = xs_val, 
                                                                                     ys_val = ys_val,  
                                                                                     w_sample = w_sample, 
                                                                                     sigma_sq_sample = sigma_sq_sample, 
                                                                                     ys_grid = PARAMS_SYNTH['ys_grid'])
-
+        pred_std = np.sqrt(pred_var)
         logger.info("...computing prediction intervals and coverage...")
         coverage_gibbs_ridge = get_prediction_interval_coverage(ys_grid = PARAMS_SYNTH['ys_grid'],
                                                                 ys_true =ys_val,
