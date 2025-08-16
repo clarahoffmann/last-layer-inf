@@ -13,10 +13,13 @@ from torch.distributions import MultivariateNormal, InverseGamma, Normal
 def w_cond_D_tau_sq_sigma_sq(Psi, ys, tau_sq, sigma_eps_sq):
     d = Psi.shape[1]
     Sigma_N_inv = (1/tau_sq)*torch.eye(d) + (1/sigma_eps_sq)*(Psi.T @ Psi)
-    Sigma_N = torch.linalg.inv(Sigma_N_inv).detach()
+    # Use cholesky factor of covar. matrix instead of the full matrix.
+    # Otherwise some numerical issues occured with inversion.
+    Sigma_N = torch.linalg.solve(Sigma_N_inv,torch.eye(d)).detach() 
+    Chol = torch.linalg.cholesky(Sigma_N)
     mu_N = Sigma_N @ ((1/sigma_eps_sq)*(Psi.T @ ys)).detach().squeeze()
 
-    dist = MultivariateNormal(loc = mu_N, covariance_matrix = Sigma_N)
+    dist = MultivariateNormal(loc = mu_N,  scale_tril= Chol) #covariance_matrix = Sigma_N)
 
     return dist.rsample()
 
