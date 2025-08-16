@@ -130,7 +130,7 @@ def get_metrics_lli_closed_form(mu_N, Sigma_N, model, xs_val, ys_val, sigma_0 ):
 def get_post_pred_dens(model: nn.Module, x_star: np.ndarray, 
                        mu_N: torch.tensor, Sigma_N: torch.tensor, 
                        sigma_eps: float):
-    psi_stars = model.get_ll_embedd(x_star).detach() #.reshape(1,1)
+    psi_stars = model.get_ll_embedd(x_star).detach()
     mu_star = mu_N.T @ psi_stars.T
     sigma_sq_star = np.array([sigma_eps**2 + psi_star @ Sigma_N @ psi_star.T for psi_star in psi_stars])
     return mu_star.detach().squeeze().numpy(), sigma_sq_star
