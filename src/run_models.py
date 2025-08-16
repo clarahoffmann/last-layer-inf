@@ -4,12 +4,11 @@ import argparse
 from pathlib import Path
 import pickle
 
-import math
 import numpy as np
-from typing import Tuple
 import torch
 import logging
-import json
+from ucimlrepo import fetch_ucirepo
+
 
 import matplotlib.pyplot as plt
 from torch.utils.data import DataLoader, TensorDataset
@@ -24,7 +23,7 @@ from models.vi import run_last_layer_vi_closed_form, run_last_layer_vi_ridge, ru
 from models.sg_mcmc import train_sg_mcmc
 from tqdm import tqdm
 from scipy.stats import norm
-from utils.data_utils import create_synthetic_train_data, f
+from utils.data_utils import create_synthetic_train_data, create_concrete_train_data
 
 from utils.coverage import get_coverage_gaussian, get_coverage_y_hats
 
@@ -39,11 +38,28 @@ PARAMS_SYNTH = {'sigma_eps': 0.3,
                 'ys_grid': torch.arange(-5,5, 0.01) # grid at which to evaluate samples of dens.
                 }
 
-PARAMS_RIDGE = {'a_sigma': 2,
+PARAMS_CONCRETE = {'sigma_eps': 0.05,
+                'num_points': 200, 
+                'xs_range': [-4,4], 
+                'num_epochs': 100, 
+                'sigma_0': 0.3, 
+                'CI_levels': np.linspace(0.001, 0.99, 100), 
+                'ys_grid': torch.arange(-5,5, 0.01) # grid at which to evaluate samples of dens.
+                }
+
+PARAMS_RIDGE_SYNTHETIC = {'a_sigma': 2,
                 'b_sigma': 2,
                 'a_tau': 2,
                 'b_tau': 2,
                 'num_iter': 1000,
+                'warm_up': 600,
+                }
+
+PARAMS_RIDGE_CONCRETE = {'a_sigma': 2,
+                'b_sigma': 2,
+                'a_tau': 2,
+                'b_tau': 2,
+                'num_iter': 2000,
                 'warm_up': 600,
                 }
 
@@ -56,10 +72,10 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 def load_backbone(params, logger):
-    ckpt_backbone = Path("./results/lli_closed_form_checkpoint.t7")
+    ckpt_backbone = Path(f"./results/lli_closed_form_{params['data']}_checkpoint.t7")
     
     if ckpt_backbone.is_file():
-        logger.info("Loading backbone...")
+        logger.info(f"Loading backbone from {ckpt_backbone}...")
         lli_net = LLI(params['model_dims'])
         checkpoint = torch.load(ckpt_backbone)
         lli_net.load_state_dict(checkpoint['model_state_dict'])
@@ -143,6 +159,37 @@ def main() -> None:
         train_set, val_set = torch.utils.data.random_split(data, [80, 20])
         dataloader_train = DataLoader(train_set, shuffle = True, batch_size=5)
         dataloader_val = DataLoader(val_set, shuffle = True, batch_size=20)
+    
+    elif params['data'] == 'concrete':
+        
+        data_file = Path("./results/concrete_data.npz")
+        
+        if data_file.is_file():
+            logger.info("Loading existing concrete training data.")
+            data = np.load(data_file)
+            xs_train = torch.tensor(data["xs_train"])
+            ys_train = torch.tensor(data["ys_train"])
+            xs_val   = torch.tensor(data["xs_val"])
+            ys_val   = torch.tensor(data["ys_val"])
+            
+        else:
+            xs, ys, xs_train, ys_train, xs_val, ys_val = create_concrete_train_data(num_train_points = 700)
+            logger.info("Save synthetic training data.")
+            np.savez_compressed(
+                data_file,
+                xs=xs,
+                ys=ys,
+                xs_train=xs_train,
+                ys_train=ys_train,
+                xs_val=xs_val,
+                ys_val=ys_val
+            )
+
+        data = TensorDataset(xs_train, ys_train)
+        train_set, val_set = torch.utils.data.random_split(data, [int(0.8*700), int(0.2*700)])
+        dataloader_train = DataLoader(train_set, shuffle = True, batch_size=5)
+        dataloader_val = DataLoader(val_set, shuffle = True, batch_size=64)
+
     else:
         ValueError('Please provide a valid dataset name from: synthetic.')
 
@@ -161,7 +208,7 @@ def main() -> None:
                                                                                 ys_val = ys_val)
 
         logger.info("...computing prediction intervals and coverage...")
-        coverage =  get_coverage_mc_dropout(ys_samples_mc, ys_val, PARAMS_SYNTH['CI_levels'])
+        coverage =  get_coverage_mc_dropout(ys_samples_mc.squeeze(), ys_val, PARAMS_SYNTH['CI_levels'])
 
          # save
         out_dict['rmse_mean'] = rmse_mc_mean.item() 
@@ -172,21 +219,22 @@ def main() -> None:
             {
                 "model_state_dict": mc_net.state_dict(),
             },
-           params['outpath'] / f"{params['method']}_checkpoint.t7"
+           params['outpath'] / f"{params['method']}_{params['data']}checkpoint.t7"
         )
 
-        with open(params['outpath'] / f"out_dict_{params['method']}.pkl", "wb") as f:
-            pickle.dump(out_dict, f)
-
-        logger.info(f"... everything saved under {params['outpath']}.")
-
-       
-
     elif params['method'] == 'bnn':
+        if params['data'] == 'synthetic':
+            input_dim = 1
+            hidden_dim = 100
+        elif params['data'] == 'concrete':
+            input_dim = 8
+            hidden_dim = 150
         bnn, out_dict = fit_bnn(num_epochs = PARAMS_SYNTH['num_epochs']*2, 
                                           xs_pred = xs_val,
                                           dataloader_train = dataloader_train, 
-                                          dataloader_val = dataloader_val)
+                                          dataloader_val = dataloader_val, 
+                                          input_dim = input_dim, 
+                                          hidden_dim = hidden_dim)
         
         bnn_samples, rmse_bnn_mean, rmse_bnn_std = get_metrics_bnn(bnn = bnn, 
                                                                    xs_val = xs_val, 
@@ -205,20 +253,17 @@ def main() -> None:
             {
                 "model_state_dict": bnn.state_dict(),
             },
-           params['outpath'] / f"{params['method']}_checkpoint.t7"
+           params['outpath'] / f"{params['method']}_{params['data']}checkpoint.t7"
         )
-
-        with open(params['outpath'] / f"out_dict_{params['method']}.pkl", "wb") as f:
-            pickle.dump(out_dict, f)
-
-        logger.info(f"... everything saved under {params['outpath']}.")
-
-
-
     
     elif params['method'] == 'lli_closed_form':
-        logger.info("Start training {params['method']}....")
+        logger.info(f"Start training {params['method']}....")
         # fit model
+        if params['data'] == 'synthetic':
+            sigma_0 = PARAMS_SYNTH['sigma_0']
+        else:
+            sigma_0 = PARAMS_CONCRETE['sigma_0']
+
         out_dict, net = fit_last_layer_closed_form(model_dims = params['model_dims'], 
                                    dataloader_train = dataloader_train, 
                                    dataloader_val = dataloader_val, 
@@ -226,7 +271,7 @@ def main() -> None:
                                    ys_train = ys_train, 
                                    xs_val = xs_val, 
                                    num_epochs = PARAMS_SYNTH['num_epochs'], 
-                                   sigma_0 = PARAMS_SYNTH['sigma_0'])
+                                   sigma_0 = sigma_0)
     
         
         logger.info("...computing RMSE...")
@@ -235,7 +280,8 @@ def main() -> None:
                                                                   model = net, 
                                                                   xs_val = xs_val, 
                                                                   ys_val = ys_val, 
-                                                                  sigma_0 = PARAMS_SYNTH['sigma_0'] )
+                                                                  sigma_0 = sigma_0 )
+
         logger.info("...computing prediction intervals and coverage...")
         coverage_lli = get_coverage_gaussian(pred_mean = lli_pred_mu, 
                                              pred_std = lli_pred_sigma, 
@@ -250,15 +296,15 @@ def main() -> None:
             {
                 "model_state_dict": net.state_dict(),
             },
-           params['outpath'] / f"{params['method']}_checkpoint.t7"
+           params['outpath'] / f"{params['method']}_{params['data']}_checkpoint.t7"
         )
 
-        with open(params['outpath'] / f"out_dict_{params['method']}.pkl", "wb") as f:
-            pickle.dump(out_dict, f)
-
-        logger.info(f"... everything saved under {params['outpath']}.")
-
     elif params['method'] == 'lli_gibbs_ridge':
+
+        if params['data'] == 'synthetic':
+            params_ridge = PARAMS_RIDGE_SYNTHETIC
+        elif params['data'] == 'concrete':
+            params_ridge = PARAMS_RIDGE_CONCRETE
 
         # load from checkpoint if we have trained a deep feature projector already.
         lli_net = load_backbone(params, logger)
@@ -269,15 +315,15 @@ def main() -> None:
         logger.info('Run Gibbs sampler...')
         w_sample, _, sigma_sq_sample = gibbs_sampler(Psi = Psi, 
                                                     ys = ys_train, 
-                                                    a_tau = PARAMS_RIDGE['a_tau'], 
-                                                    b_tau = PARAMS_RIDGE['b_tau'], 
-                                                    a_sigma = PARAMS_RIDGE['a_sigma'], 
-                                                    b_sigma = PARAMS_RIDGE['b_sigma'], 
-                                                    num_iter = PARAMS_RIDGE['num_iter'], 
-                                                    warm_up = PARAMS_RIDGE['warm_up'])
+                                                    a_tau = params_ridge['a_tau'], 
+                                                    b_tau = params_ridge['b_tau'], 
+                                                    a_sigma = params_ridge['a_sigma'], 
+                                                    b_sigma = params_ridge['b_sigma'], 
+                                                    num_iter = params_ridge['num_iter'], 
+                                                    warm_up = params_ridge['warm_up'])
         logger.info('... finished.')
                                 
-        out_dict = {'params': PARAMS_RIDGE,
+        out_dict = {'params': params_ridge,
                     'w_sample': w_sample,
                     'sigma_sq_sample': sigma_sq_sample}
         
@@ -300,11 +346,6 @@ def main() -> None:
                                 coverage_gibbs_ridge]):
             out_dict[key] = value
 
-        with open(params['outpath'] / f"out_dict_{params['method']}.pkl", "wb") as f:
-            pickle.dump(out_dict, f)
-
-        logger.info(f"... everything saved under {params['outpath']}.")
-
     elif params['method'] == 'lli_vi_closed_form':
 
         lli_net = load_backbone(params, logger)
@@ -325,7 +366,7 @@ def main() -> None:
         
         logger.info('Predict on validation data....')
         with torch.no_grad():
-            Psi_val = lli_net.get_ll_embedd(xs_train).detach()
+            Psi_val = lli_net.get_ll_embedd(xs_val).detach()
         
         pred_mu = (Psi_val @  last_layer_vi.mu.T)
         L  = last_layer_vi.get_L()
@@ -339,6 +380,7 @@ def main() -> None:
                     }
         
         logger.info('Get metrics...')
+        print(pred_mu.shape, ys_val.reshape(-1,1).shape)
         rmse_lli = (ys_val.reshape(-1,1) - pred_mu).pow(2).sqrt()
         rmse_mean = rmse_lli.mean().item()
         rmse_std = rmse_lli.std().item()
@@ -350,11 +392,6 @@ def main() -> None:
 
         for key, value in zip(['rmse_mean', 'rmse_std', 'coverage'], [rmse_mean, rmse_std, coverage]):
             out_dict[key] = value
-
-        with open(params['outpath'] / f"out_dict_{params['method']}.pkl", "wb") as f:
-            pickle.dump(out_dict, f)
-
-        logger.info(f"... everything saved under {params['outpath']}.")
 
 
     elif params['method'] == 'lli_vi_ridge':
@@ -405,15 +442,6 @@ def main() -> None:
         for key, value in zip(['rmse_mean', 'rmse_std', 'coverage'], [rmse_mean, rmse_std, coverage]):
             out_dict[key] = value
 
-        with open(params['outpath'] / f"out_dict_{params['method']}.pkl", "wb") as f:
-            pickle.dump(out_dict, f)
-
-        logger.info(f"... everything saved under {params['outpath']}.")
-        
-        
-
-
-
     elif params['method'] == 'lli_vi_horseshoe':
         lli_net = load_backbone(params, logger)
         
@@ -460,11 +488,6 @@ def main() -> None:
         for key, value in zip(['rmse_mean', 'rmse_std', 'coverage'], [rmse_mean, rmse_std, coverage]):
             out_dict[key] = value
 
-        with open(params['outpath'] / f"out_dict_{params['method']}.pkl", "wb") as f:
-            pickle.dump(out_dict, f)
-
-        logger.info(f"... everything saved under {params['outpath']}.")
-
     elif params['method'] == 'lli_vi_ridge_full_fac':
 
         lli_net = load_backbone(params, logger)
@@ -510,11 +533,6 @@ def main() -> None:
 
         for key, value in zip(['rmse_mean', 'rmse_std', 'coverage'], [rmse_mean, rmse_std, coverage]):
             out_dict[key] = value
-
-        with open(params['outpath'] / f"out_dict_{params['method']}.pkl", "wb") as f:
-            pickle.dump(out_dict, f)
-
-        logger.info(f"... everything saved under {params['outpath']}.")
 
 
     elif params['method'] == 'lli_vi_horseshoe_full_fac':
@@ -563,19 +581,16 @@ def main() -> None:
         
         for key, value in zip(['rmse_mean', 'rmse_std', 'coverage'], [rmse_mean, rmse_std, coverage]):
             out_dict[key] = value
-
-        with open(params['outpath'] / f"out_dict_{params['method']}.pkl", "wb") as f:
-            pickle.dump(out_dict, f)
-
-        logger.info(f"... everything saved under {params['outpath']}.")
-
-
     
     else:
         ValueError('Please provide a valid method from: \n mc_dropout, bnn, ' \
                     'lli_vi_ridge, lli_vi_horseshoe,\n lli_vi_fac_ridge,' \
                     ' lli_vi_fac_horseshoe, lli_gibbs_ridge. ')
         
+    with open(params['outpath'] / f"out_dict_{params['method']}_{params['data']}.pkl", "wb") as f:
+            pickle.dump(out_dict, f)
+
+    logger.info(f"... everything saved under {params['outpath']}.")   
 
 if __name__ == "__main__":
     main()
