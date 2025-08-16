@@ -157,8 +157,8 @@ def main() -> None:
 
         data = TensorDataset(xs_train, ys_train)
         train_set, val_set = torch.utils.data.random_split(data, [80, 20])
-        dataloader_train = DataLoader(train_set, shuffle = True, batch_size=5)
-        dataloader_val = DataLoader(val_set, shuffle = True, batch_size=20)
+        dataloader_train = DataLoader(train_set, shuffle = True, batch_size=32)
+        dataloader_val = DataLoader(val_set, shuffle = True, batch_size=32)
     
     elif params['data'] == 'concrete':
         
@@ -187,7 +187,7 @@ def main() -> None:
 
         data = TensorDataset(xs_train, ys_train)
         train_set, val_set = torch.utils.data.random_split(data, [int(0.8*700), int(0.2*700)])
-        dataloader_train = DataLoader(train_set, shuffle = True, batch_size=5)
+        dataloader_train = DataLoader(train_set, shuffle = True, batch_size=64)
         dataloader_val = DataLoader(val_set, shuffle = True, batch_size=64)
 
     else:
@@ -381,7 +381,7 @@ def main() -> None:
         
         logger.info('Get metrics...')
         print(pred_mu.shape, ys_val.reshape(-1,1).shape)
-        rmse_lli = (ys_val.reshape(-1,1) - pred_mu).pow(2).sqrt()
+        rmse_lli = (ys_val.squeeze() - pred_mu.squeeze()).pow(2).sqrt()
         rmse_mean = rmse_lli.mean().item()
         rmse_std = rmse_lli.std().item()
         coverage = get_coverage_gaussian(pred_mean = pred_mu.detach().numpy(), 
