@@ -34,7 +34,7 @@ PARAMS_SYNTH = {'sigma_eps': 0.3,
                 'xs_range': [-4,4], 
                 'num_epochs': 100, 
                 'sigma_0': 0.3, 
-                'CI_levels': np.linspace(0.001, 0.99, 100), 
+                'CI_levels': np.linspace(0.001, 0.99, 10), 
                 'ys_grid': torch.arange(-5,5, 0.01) # grid at which to evaluate samples of dens.
                 }
 
@@ -43,7 +43,7 @@ PARAMS_CONCRETE = {'sigma_eps': 0.05,
                 'xs_range': [-4,4], 
                 'num_epochs': 100, 
                 'sigma_0': 0.3, 
-                'CI_levels': np.linspace(0.001, 0.99, 100), 
+                'CI_levels': np.linspace(0.001, 0.99, 10), 
                 'ys_grid': torch.arange(-5,5, 0.01) # grid at which to evaluate samples of dens.
                 }
 
@@ -51,8 +51,8 @@ PARAMS_RIDGE_SYNTHETIC = {'a_sigma': 2,
                 'b_sigma': 2,
                 'a_tau': 2,
                 'b_tau': 2,
-                'num_iter': 1000,
-                'warm_up': 600,
+                'num_iter': 2000,
+                'warm_up': 1000,
                 }
 
 PARAMS_RIDGE_CONCRETE = {'a_sigma': 2,
@@ -60,7 +60,7 @@ PARAMS_RIDGE_CONCRETE = {'a_sigma': 2,
                 'a_tau': 2,
                 'b_tau': 2,
                 'num_iter': 2000,
-                'warm_up': 600,
+                'warm_up': 1000,
                 }
 
 
@@ -157,8 +157,8 @@ def main() -> None:
 
         data = TensorDataset(xs_train, ys_train)
         train_set, val_set = torch.utils.data.random_split(data, [80, 20])
-        dataloader_train = DataLoader(train_set, shuffle = True, batch_size=32)
-        dataloader_val = DataLoader(val_set, shuffle = True, batch_size=32)
+        dataloader_train = DataLoader(train_set, shuffle = True, batch_size=5)
+        dataloader_val = DataLoader(val_set, shuffle = True, batch_size=5)
     
     elif params['data'] == 'concrete':
         
@@ -208,7 +208,7 @@ def main() -> None:
                                                                                 ys_val = ys_val)
 
         logger.info("...computing prediction intervals and coverage...")
-        coverage =  get_coverage_mc_dropout(ys_samples_mc.squeeze(), ys_val, PARAMS_SYNTH['CI_levels'])
+        coverage =  get_coverage_mc_dropout(ys_samples_mc.squeeze(), ys_val.squeeze(), PARAMS_SYNTH['CI_levels'])
 
          # save
         out_dict['rmse_mean'] = rmse_mc_mean.item() 
@@ -241,7 +241,7 @@ def main() -> None:
                                                                    ys_val = ys_val)
 
         coverage = get_coverage_y_hats(y_samples = torch.stack(bnn_samples).squeeze(), 
-                                        y_true = ys_val, 
+                                        y_true = ys_val.squeeze(), 
                                         levels = PARAMS_SYNTH['CI_levels'])
 
         # save
@@ -283,9 +283,9 @@ def main() -> None:
                                                                   sigma_0 = sigma_0 )
 
         logger.info("...computing prediction intervals and coverage...")
-        coverage_lli = get_coverage_gaussian(pred_mean = lli_pred_mu, 
-                                             pred_std = lli_pred_sigma, 
-                                             y_true = ys_val.detach().numpy(), 
+        coverage_lli = get_coverage_gaussian(pred_mean = lli_pred_mu.squeeze(), 
+                                             pred_std = lli_pred_sigma.squeeze(), 
+                                             y_true = ys_val.detach().numpy().squeeze(), 
                                              levels=PARAMS_SYNTH['CI_levels'])
         
         out_dict['rmse_mean'] = rmse_lli_mean.item()
@@ -384,9 +384,9 @@ def main() -> None:
         rmse_lli = (ys_val.squeeze() - pred_mu.squeeze()).pow(2).sqrt()
         rmse_mean = rmse_lli.mean().item()
         rmse_std = rmse_lli.std().item()
-        coverage = get_coverage_gaussian(pred_mean = pred_mu.detach().numpy(), 
-                                         pred_std = pred_std.detach().numpy(), 
-                                         y_true = ys_val.detach().numpy(), 
+        coverage = get_coverage_gaussian(pred_mean = pred_mu.detach().numpy().squeeze(), 
+                                         pred_std = pred_std.detach().numpy().squeeze(), 
+                                         y_true = ys_val.detach().numpy().squeeze(), 
                                          levels=PARAMS_SYNTH['CI_levels'])
         logger.info('...finished.')
 
@@ -433,9 +433,9 @@ def main() -> None:
         rmse_lli = (ys_val.reshape(-1,1) - pred_mu).pow(2).sqrt()
         rmse_mean = rmse_lli.mean().item()
         rmse_std = rmse_lli.std().item()
-        coverage = get_coverage_gaussian(pred_mean = pred_mu.detach().numpy(), 
-                                         pred_std = pred_std.detach().numpy(), 
-                                         y_true = ys_val.detach().numpy(), 
+        coverage = get_coverage_gaussian(pred_mean = pred_mu.detach().numpy().squeeze(), 
+                                         pred_std = pred_std.detach().numpy().squeeze(), 
+                                         y_true = ys_val.detach().numpy().squeeze(), 
                                          levels=PARAMS_SYNTH['CI_levels'])
         logger.info('...finished.')
 
@@ -478,9 +478,9 @@ def main() -> None:
         rmse_lli = (ys_val.reshape(-1,1) - pred_mu).pow(2).sqrt()
         rmse_mean = rmse_lli.mean().item()
         rmse_std = rmse_lli.std().item()
-        coverage = get_coverage_gaussian(pred_mean = pred_mu.detach().numpy(), 
-                                         pred_std = pred_std.detach().numpy(), 
-                                         y_true = ys_val.detach().numpy(), 
+        coverage = get_coverage_gaussian(pred_mean = pred_mu.detach().numpy().squeeze(), 
+                                         pred_std = pred_std.detach().numpy().squeeze(), 
+                                         y_true = ys_val.detach().numpy().squeeze(), 
                                          levels=PARAMS_SYNTH['CI_levels'])
         
         logger.info('...finished.')
@@ -524,9 +524,9 @@ def main() -> None:
         rmse_lli = (ys_val.reshape(-1,1) - pred_mu).pow(2).sqrt()
         rmse_mean = rmse_lli.mean().item()
         rmse_std = rmse_lli.std().item()
-        coverage = get_coverage_gaussian(pred_mean = pred_mu.detach().numpy(), 
-                                         pred_std = pred_std.detach().numpy(), 
-                                         y_true = ys_val.detach().numpy(), 
+        coverage = get_coverage_gaussian(pred_mean = pred_mu.detach().numpy().squeeze(), 
+                                         pred_std = pred_std.detach().numpy().squeeze(), 
+                                         y_true = ys_val.detach().numpy().squeeze(), 
                                          levels=PARAMS_SYNTH['CI_levels'])
         
         logger.info('...finished.')
@@ -560,8 +560,9 @@ def main() -> None:
             L = last_layer_vi.in_features
             Sigma_w = Sigma_q[:L, :L]
             Z = torch.sum((Psi_val @ Sigma_w) * Psi_val, dim=1)
-            #sigma_eps_sq = torch.exp(last_layer_vi.log_sigma_eps_sq_mu).squeeze() 
-            pred_std = torch.sqrt( Z + + PARAMS_SYNTH['sigma_eps']).detach().numpy()
+            # change below if something is weird
+            sigma_eps_sq = torch.exp(last_layer_vi.log_sigma_eps_sq_mu).squeeze()  
+            pred_std = torch.sqrt( Z + sigma_eps_sq).detach().numpy()
         logger.info('...finished.')
 
         out_dict = {'pred_mu': pred_mu,
@@ -573,9 +574,9 @@ def main() -> None:
         rmse_lli = (ys_val.reshape(-1,1) - pred_mu).pow(2).sqrt()
         rmse_mean = rmse_lli.mean().item()
         rmse_std = rmse_lli.std().item()
-        coverage = get_coverage_gaussian(pred_mean = pred_mu, 
-                                         pred_std = pred_std, 
-                                         y_true = ys_val.detach().numpy(), 
+        coverage = get_coverage_gaussian(pred_mean = pred_mu.squeeze(), 
+                                         pred_std = pred_std.squeeze(), 
+                                         y_true = ys_val.detach().numpy().squeeze(), 
                                          levels=PARAMS_SYNTH['CI_levels'])
         logger.info('...finished.')
         
