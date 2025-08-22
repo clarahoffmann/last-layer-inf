@@ -59,7 +59,7 @@ PARAMS_RIDGE_CONCRETE = {'a_sigma': 2,
                 'b_sigma': 2,
                 'a_tau': 2,
                 'b_tau': 2,
-                'num_iter': 2000,
+                'num_iter': 3000,
                 'warm_up': 1000,
                 }
 
@@ -208,7 +208,7 @@ def main() -> None:
                                                                                 ys_val = ys_val)
 
         logger.info("...computing prediction intervals and coverage...")
-        coverage =  get_coverage_mc_dropout(ys_samples_mc.squeeze(), ys_val.squeeze(), PARAMS_SYNTH['CI_levels'])
+        coverage =  get_coverage_mc_dropout(ys_samples_mc.squeeze(), ys_val, PARAMS_SYNTH['CI_levels'])
 
          # save
         out_dict['rmse_mean'] = rmse_mc_mean.item() 
@@ -241,7 +241,7 @@ def main() -> None:
                                                                    ys_val = ys_val)
 
         coverage = get_coverage_y_hats(y_samples = torch.stack(bnn_samples).squeeze(), 
-                                        y_true = ys_val.squeeze(), 
+                                        y_true = ys_val, 
                                         levels = PARAMS_SYNTH['CI_levels'])
 
         # save
