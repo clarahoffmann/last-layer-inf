@@ -38,11 +38,11 @@ class HMC(nn.Module):
         with torch.enable_grad():
             x = x.clone().detach()
             x.requires_grad = True
-            logprob = self.log_prob(x).sum()
+            logprob = self.log_prob(x) #.sum()
             grad = torch.autograd.grad(logprob, x)[0]
             # clamp gradients to avoid exploding
             # epsilon values
-            grad = torch.clamp(grad, min=-5, max=5)
+            #grad = torch.clamp(grad, min=-100, max=100)
             return grad
 
     def leapfrog(self, x, p):
@@ -81,22 +81,42 @@ class HMC(nn.Module):
             samples.append(x.clone().detach())
         accept_prob = torch.mean(torch.tensor(accept_probs))
         # return last 1000 samples of HMC chain
-        return torch.stack(samples)[-500:, :], accept_prob, accept_probs
+        return torch.stack(samples)[-1000:, :], accept_prob, accept_probs
+
+def make_log_prob_flat(ys_train, Psi, tau_sq=1.0, a_sigma=2.0, b_sigma=2.0):
+    L = Psi.shape[1]  # number of covariates
+
+    def log_prob_flat(x):
+        # unpack parameters
+        beta = x[:L]
+        lambda_j = x[L:2*L]
+        sigma2 = x[-1]
+
+        return log_posterior_horseshoe(
+            ys_train, Psi, beta, L, sigma2, tau_sq, lambda_j, a_sigma, b_sigma
+        )
+
+    return log_prob_flat
+
+def unpack_samples(samples, L):
+    w_samples = samples[:, :L]
+    lambda_samples = torch.exp(samples[:, L:2*L])
+    sigma_eps_sq_samples = torch.exp(samples[:, -1])
+    return w_samples, lambda_samples, sigma_eps_sq_samples
 
 def log_posterior_horseshoe(ys_train, Psi, w, N, log_sigma_eps_sq, log_tau_sq, log_lambdas, a_sigma = 2, b_sigma = 2):
 
-    sigma_eps_sq = torch.exp(log_sigma_eps_sq) + 1e-5
-    tau_sq = math.exp(log_tau_sq) + 1e-5
-    lambdas = torch.exp(log_lambdas) + 1e-5
+    sigma_eps_sq = torch.exp(log_sigma_eps_sq) #+ 1e-5
+    tau_sq = math.exp(log_tau_sq) #+ 1e-5
+    lambdas = torch.exp(log_lambdas) #+ 1e-5
 
-    ys_pred = (Psi @ w) #.unsqueeze(-1)
-    #print(ys_pred.shape, ys_train.shape, sigma_eps_sq.shape)
+    ys_pred = (Psi @ w)
 
-    log_likelihood =  -0.5 * N * torch.log(sigma_eps_sq) -0.5 * (ys_train - ys_pred.unsqueeze(-1)) ** 2 / sigma_eps_sq
+    log_likelihood =  -0.5 * N * torch.log(sigma_eps_sq) -0.5 * torch.sum((ys_train - ys_pred.unsqueeze(-1)) ** 2) / sigma_eps_sq
 
     log_p_w = -0.5 * torch.sum(w**2 / (tau_sq * lambdas**2)) - torch.sum(torch.log(lambdas))
     log_p_lambdas = torch.sum(torch.log(2/(torch.pi * (1 + lambdas**2))))
 
     log_p_sigma = -(a_sigma+1)*torch.log(sigma_eps_sq) - b_sigma / sigma_eps_sq
     
-    return log_likelihood.sum() +  log_p_w + log_p_sigma + log_p_lambdas
+    return log_likelihood +  log_p_w + log_p_sigma + log_p_lambdas

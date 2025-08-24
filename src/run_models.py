@@ -16,6 +16,7 @@ from models.mc_dropout import fit_mc_dropout, get_metrics_mc_dropout, get_covera
 from models.bnn import fit_bnn, get_metrics_bnn
 from models.sg_mcmc import train_sg_mcmc_gauss, predict_sg_mcmc_gauss
 from models.gibbs_sampler import gibbs_sampler, get_metrics_ridge, get_prediction_interval_coverage
+from models.hmc import make_log_prob_flat, HMC, unpack_samples
 from models.vi import run_last_layer_vi_closed_form, run_last_layer_vi_ridge, run_last_layer_vi_horseshoe, run_last_layer_vi_ridge_full_fac, run_last_layer_vi_horseshoe_full_fac
 from utils.data_utils import create_synthetic_train_data, create_concrete_train_data
 
@@ -571,6 +572,9 @@ def main() -> None:
         rmse_lli = (ys_val.reshape(-1,1) - pred_mu).pow(2).sqrt()
         rmse_mean = rmse_lli.mean().item()
         rmse_std = rmse_lli.std().item()
+        
+        # check again! 
+        # I think we need to compute the coverage here differently
         coverage = get_coverage_gaussian(pred_mean = pred_mu.squeeze(), 
                                          pred_std = pred_std.squeeze(), 
                                          y_true = ys_val.detach().numpy().squeeze(), 
@@ -631,6 +635,62 @@ def main() -> None:
                                     ])
         out_dict['coverage'] = coverage_sg_mcmc
 
+    elif params['method'] == 'lli_hmc_horseshoe':
+        """We choose the following HMC parameters for the synthetic data
+        and for the concrete data
+        # number leapfrog steps: synth = 18
+        # number iterations: synth T = 5000
+        # step size: synth = 0.0045
+        With these, the acceptance rate is approx. 65% as recommend for HMC."""
+
+        if params['data'] == 'synthetic':
+            T = 5000
+            L = 18
+            step_size = torch.tensor(0.0045)
+
+        elif params['data'] == 'concrete':
+            T = 8000
+            L = 20
+            step_size = torch.tensor(0.0015)
+
+        lli_net = load_backbone(params, logger)
+
+        for param in lli_net.parameters():
+            param.requires_grad = False
+        with torch.no_grad():
+            Psi = lli_net.get_ll_embedd(xs_train)
+            _, L = Psi.shape
+
+        log_prob = make_log_prob_flat(ys_train, Psi, tau_sq=1)
+        hmc = HMC(dim=2*L+1, T=T, L=L, step_size=step_size)
+        hmc.register_log_prob(log_prob)
+        x0 = torch.cat([torch.zeros(L), torch.zeros(L), torch.tensor([0.0])]) # Initial state
+
+        samples, accept_prob, _ = hmc(x0)
+        print("Acceptance probability:", accept_prob)
+
+        w_samples, _, sigma_eps_sq_samples = unpack_samples(samples, L)
+
+        with torch.no_grad():
+            Psi_val = lli_net.get_ll_embedd(xs_val)
+            pred_mu_samples = (Psi_val @  w_samples.T)
+            pred_mu = pred_mu_samples.mean(dim = -1)
+            pred_mus = Psi_val @ w_samples.T
+            pred_std = torch.sqrt(torch.var(pred_mus, dim=-1) + sigma_eps_sq_samples.mean())  
+        
+        out_dict = {'pred_mu': pred_mu.detach().numpy(),
+                    'pred_sigma': pred_std.detach().numpy(),
+                    'w_samples': w_samples,
+                    'sigma_eps_sq_samples': sigma_eps_sq_samples,
+                    }
+
+        # check again! 
+        # I think we need to compute the coverage here differently
+        coverage = get_coverage_gaussian(pred_mean = pred_mu.detach().numpy().squeeze(), 
+                                         pred_std = pred_std.detach().numpy().squeeze(), 
+                                         y_true = ys_val.detach().numpy().squeeze(), 
+                                         levels=PARAMS_SYNTH['CI_levels'])
+        out_dict['coverage'] = coverage
     
     else:
         ValueError('Please provide a valid method from: \n mc_dropout, bnn, ' \
