@@ -4,25 +4,19 @@ import argparse
 from pathlib import Path
 import pickle
 
+import math
 import numpy as np
 import torch
 import logging
-from ucimlrepo import fetch_ucirepo
 
-
-import matplotlib.pyplot as plt
 from torch.utils.data import DataLoader, TensorDataset
-from numpy.lib.stride_tricks import sliding_window_view
-import torch.nn.functional as F
 from models.last_layer_models import fit_last_layer_closed_form, get_metrics_lli_closed_form, LLI, LastLayerVIClosedForm, LastLayerVIRidge, LastLayerVIHorseshoe, LastLayerVIRidgeFullCov, LastLayerVIHorseshoeFullCov
 
 from models.mc_dropout import fit_mc_dropout, get_metrics_mc_dropout, get_coverage_mc_dropout
 from models.bnn import fit_bnn, get_metrics_bnn
+from models.sg_mcmc import train_sg_mcmc_gauss, predict_sg_mcmc_gauss
 from models.gibbs_sampler import gibbs_sampler, get_metrics_ridge, get_prediction_interval_coverage
 from models.vi import run_last_layer_vi_closed_form, run_last_layer_vi_ridge, run_last_layer_vi_horseshoe, run_last_layer_vi_ridge_full_fac, run_last_layer_vi_horseshoe_full_fac
-from models.sg_mcmc import train_sg_mcmc
-from tqdm import tqdm
-from scipy.stats import norm
 from utils.data_utils import create_synthetic_train_data, create_concrete_train_data
 
 from utils.coverage import get_coverage_gaussian, get_coverage_y_hats
@@ -62,6 +56,11 @@ PARAMS_RIDGE_CONCRETE = {'a_sigma': 2,
                 'num_iter': 3000,
                 'warm_up': 1000,
                 }
+
+PARAMS_SG_MCMC = {'T': 2000,
+                  'warm_up': 1000,
+                  'a': 0.1, 
+                  'b': 1}
 
 
 logging.basicConfig(
@@ -380,7 +379,7 @@ def main() -> None:
                     }
         
         logger.info('Get metrics...')
-        print(pred_mu.shape, ys_val.reshape(-1,1).shape)
+
         rmse_lli = (ys_val.squeeze() - pred_mu.squeeze()).pow(2).sqrt()
         rmse_mean = rmse_lli.mean().item()
         rmse_std = rmse_lli.std().item()
@@ -542,8 +541,6 @@ def main() -> None:
             param.requires_grad = False
         with torch.no_grad():
             Psi = lli_net.get_ll_embedd(xs_train)
-
-        logger.info('here')
         
         last_layer_vi = LastLayerVIHorseshoeFullCov(in_features=Psi.shape[1], out_features=1, rank_B = 15)
         optimizer_vi = torch.optim.Adam(last_layer_vi.parameters(), lr=1e-3)
@@ -583,10 +580,62 @@ def main() -> None:
         for key, value in zip(['rmse_mean', 'rmse_std', 'coverage'], [rmse_mean, rmse_std, coverage]):
             out_dict[key] = value
     
+    elif params['method'] == 'lli_sg_mcmc_gauss':
+
+        if params['data'] == 'synthetic':
+            sigma_eps = PARAMS_SYNTH['sigma_eps']
+            sigma_eps_sq = PARAMS_SYNTH['sigma_eps']**2
+            batch_size = 5
+
+        elif params['data'] == 'concrete':
+            sigma_eps = PARAMS_CONCRETE['sigma_eps']
+            sigma_eps_sq =PARAMS_CONCRETE['sigma_eps']**2
+            batch_size = 5
+
+        lli_net = load_backbone(params, logger)
+        
+        for param in lli_net.parameters():
+            param.requires_grad = False
+        with torch.no_grad():
+            Psi = lli_net.get_ll_embedd(xs_train)
+
+        gamma = math.log(100)/math.log(PARAMS_SG_MCMC['T']+1)
+
+        w_samples, epsilon_ts =  train_sg_mcmc_gauss(Psi = Psi, 
+                            lli_net = lli_net, 
+                            dataloader_train = dataloader_train, 
+                            batch_size = batch_size, 
+                            sigma_eps_sq = sigma_eps_sq, 
+                            a = PARAMS_SG_MCMC['a'],
+                            b = PARAMS_SG_MCMC['b'], 
+                            gamma = gamma,
+                            T = PARAMS_SG_MCMC['T'],
+                            warm_up = PARAMS_SG_MCMC['warm_up'])
+        
+        pred_mu, pred_std = predict_sg_mcmc_gauss(lli_net = lli_net, 
+                              xs_val = xs_val, 
+                              w_sample = w_samples, 
+                              sigma_eps = sigma_eps,
+                              epsilon_ts = torch.tensor(epsilon_ts))
+
+        out_dict = {'pred_mu': pred_mu.detach().numpy(),
+                    'pred_sigma': pred_std.detach().numpy(),
+                    'w_samples': w_samples,
+                    'epsilon_ts': epsilon_ts,
+                    }
+        
+        coverage_sg_mcmc = get_coverage_gaussian(pred_mean = pred_mu.detach().numpy().squeeze(), 
+                                    pred_std = pred_std.detach().numpy().squeeze(), 
+                                    y_true = ys_val.detach().numpy().squeeze(), 
+                                    levels=PARAMS_SYNTH['CI_levels' 
+                                    ])
+        out_dict['coverage'] = coverage_sg_mcmc
+
+    
     else:
         ValueError('Please provide a valid method from: \n mc_dropout, bnn, ' \
                     'lli_vi_ridge, lli_vi_horseshoe,\n lli_vi_fac_ridge,' \
-                    ' lli_vi_fac_horseshoe, lli_gibbs_ridge. ')
+                    ' lli_vi_fac_horseshoe, lli_gibbs_ridge, sg_mcmc_gauss ')
         
     with open(params['outpath'] / f"out_dict_{params['method']}_{params['data']}.pkl", "wb") as f:
             pickle.dump(out_dict, f)
